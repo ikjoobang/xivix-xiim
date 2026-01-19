@@ -57,7 +57,7 @@ function isAllowedOrigin(origin: string | undefined): boolean {
  * Referrer 검증 함수
  */
 function isAllowedReferrer(referrer: string | undefined): boolean {
-  if (!referrer) return true; // Referrer 없으면 Origin으로 검증
+  if (!referrer) return false; // Referrer 없으면 false (Origin으로만 검증)
   
   try {
     const url = new URL(referrer);
