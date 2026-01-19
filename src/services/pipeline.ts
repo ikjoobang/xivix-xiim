@@ -26,7 +26,9 @@ import {
 import { 
   analyzeImageWithGemini, 
   filterHighConfidenceZones, 
-  DEFAULT_IMAGE_DIMENSIONS 
+  DEFAULT_IMAGE_DIMENSIONS,
+  verifyInsuranceImage,
+  type ImageVerificationResult
 } from './gemini';
 import { 
   captureScreenshot, 
@@ -49,6 +51,12 @@ import {
   registerHash,
   getInsuranceCompanyByCode 
 } from './database';
+import {
+  getR2Sample,
+  getCompanyNameKo,
+  hasSampleForCompany,
+  type InsuranceSample
+} from './r2-fallback';
 
 /**
  * 메인 파이프라인 실행
@@ -232,10 +240,78 @@ export async function executePipeline(
     context.source_image_url = sourceUrl;
     
     // ============================================
+    // Step 3.5: 이미지 검증 (Gemini AI Pre-verification)
+    // ============================================
+    console.log(`[${requestId}] Step 3.5: Gemini AI 이미지 검증 중...`);
+    
+    // source_url로 직접 제공된 경우 검증 건너뛰기
+    const skipVerification = !!request.request_info.source_url;
+    let useR2Fallback = false;
+    let r2Sample: { data: ArrayBuffer; sample: InsuranceSample } | null = null;
+    
+    if (!skipVerification) {
+      // 검증 대상 보험사 한글명 가져오기
+      const targetCompanyKo = getCompanyNameKo(request.request_info.target_company);
+      
+      // Gemini 2.0 Flash로 빠른 검증 (0.5초 타임아웃)
+      const verificationResult = await Promise.race([
+        verifyInsuranceImage(env.GEMINI_API_KEY, imageData, targetCompanyKo),
+        new Promise<ImageVerificationResult>((resolve) => 
+          setTimeout(() => resolve({
+            is_valid: false,
+            detected_company: null,
+            is_design_document: false,
+            reason: '검증 타임아웃',
+            confidence: 0
+          }), 3000) // 3초 타임아웃 (검증에 시간 필요)
+        )
+      ]);
+      
+      console.log(`[${requestId}] - 검증 결과: ${verificationResult.is_valid ? '✅ 통과' : '❌ 실패'}`);
+      console.log(`[${requestId}] - 감지된 보험사: ${verificationResult.detected_company || '미확인'}`);
+      console.log(`[${requestId}] - 설계서 여부: ${verificationResult.is_design_document ? 'Yes' : 'No'}`);
+      console.log(`[${requestId}] - 판단 근거: ${verificationResult.reason}`);
+      
+      // 검증 실패 시 R2 폴백 시도
+      if (!verificationResult.is_valid) {
+        console.log(`[${requestId}] - 검증 실패, R2 표준 샘플로 폴백 시도...`);
+        
+        // R2에서 해당 보험사 샘플 가져오기
+        if (hasSampleForCompany(request.request_info.target_company)) {
+          // 키워드에서 상품 유형 추출 시도
+          const productKeyword = extractProductType(request.request_info.keyword);
+          
+          r2Sample = await getR2Sample(
+            env,
+            request.request_info.target_company,
+            productKeyword
+          );
+          
+          if (r2Sample) {
+            console.log(`[${requestId}] - ✅ R2 샘플 폴백 성공: ${r2Sample.sample.sample_key}`);
+            imageData = r2Sample.data;
+            sourceUrl = `r2://samples/${r2Sample.sample.sample_key}`;
+            useR2Fallback = true;
+          } else {
+            console.log(`[${requestId}] - R2 샘플 없음, 원본 이미지로 계속 진행`);
+          }
+        } else {
+          console.log(`[${requestId}] - ${request.request_info.target_company}에 대한 R2 샘플 미등록, 원본 이미지로 계속 진행`);
+        }
+      }
+      
+      // 컨텍스트 업데이트
+      context.source_image_data = imageData;
+      context.source_image_url = sourceUrl;
+    } else {
+      console.log(`[${requestId}] - source_url 직접 제공됨, 검증 건너뛰기`);
+    }
+    
+    // ============================================
     // Step 4-5: 원본 저장 + AI 분석 (병렬 처리로 성능 최적화)
     // ============================================
     context.current_step = 'raw_storage';
-    console.log(`[${requestId}] Step 4-5: 원본 저장 + AI 분석 (병렬 처리)...`);
+    console.log(`[${requestId}] Step 4-5: 원본 저장 + AI 분석 (병렬 처리)...${useR2Fallback ? ' [R2 폴백 모드]' : ''}`);
     
     // 해시 계산 (빠름)
     const sourceHash = await hashArrayBuffer(imageData);
@@ -495,4 +571,34 @@ function createErrorResponse(
     },
     request_id: requestId
   };
+}
+
+/**
+ * 키워드에서 상품 유형 추출
+ */
+function extractProductType(keyword: string): string | undefined {
+  const productPatterns: Record<string, string[]> = {
+    '종신': ['종신', '종신보험', 'universal', 'whole'],
+    '암': ['암', '암보험', 'cancer'],
+    '어린이': ['어린이', '자녀', '아이', '태아', 'child', 'kids'],
+    '운전자': ['운전자', '운전', 'driver'],
+    '연금': ['연금', 'pension', 'annuity'],
+    '건강': ['건강', 'health'],
+    '상해': ['상해', 'injury'],
+    '화재': ['화재', 'fire'],
+    '실손': ['실손', '실비', 'real'],
+    '치아': ['치아', 'dental']
+  };
+  
+  const keywordLower = keyword.toLowerCase();
+  
+  for (const [productType, patterns] of Object.entries(productPatterns)) {
+    for (const pattern of patterns) {
+      if (keywordLower.includes(pattern.toLowerCase())) {
+        return productType;
+      }
+    }
+  }
+  
+  return undefined;
 }

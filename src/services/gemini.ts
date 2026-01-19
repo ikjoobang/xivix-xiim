@@ -328,3 +328,177 @@ export function filterHighConfidenceZones(
 ): MaskingZone[] {
   return zones.filter(zone => zone.confidence >= minConfidence);
 }
+
+// ============================================
+// 이미지 검증 시스템 (Pre-processing)
+// ============================================
+
+/** 이미지 검증 결과 타입 */
+export interface ImageVerificationResult {
+  is_valid: boolean;
+  detected_company: string | null;
+  is_design_document: boolean;
+  reason: string;
+  confidence: number;
+}
+
+/**
+ * 이미지 검증 프롬프트 (보험사 + 설계안 여부)
+ */
+const VERIFICATION_PROMPT = `
+당신은 보험 설계서 검증 전문가입니다. 이 이미지를 분석하여 다음 질문에 정확히 답하세요.
+
+**질문**:
+1. 이 이미지가 실제 보험 가입설계서 또는 보장분석표인가요? (단순 광고, 뉴스, 건물사진, 인물사진은 FALSE)
+2. 이미지에서 어떤 보험사가 감지되나요?
+
+**설계서로 인정되는 조건**:
+- 보험료(월납, 일시납) 금액이 표시됨
+- 보장내역(특약명, 보장금액)이 표 형식으로 나열됨
+- 피보험자/계약자 정보 란이 있음
+- 보험증권번호 또는 계약일자가 표시됨
+
+**설계서가 아닌 것**:
+- 보험사 건물/본사 사진
+- 광고 배너 또는 홍보 이미지
+- 뉴스 기사 캡처
+- 주가/거래량 차트
+- 단체사진, 인물사진
+- 캐릭터/마스코트 이미지
+
+**응답 형식** (JSON만 반환):
+{
+  "is_design_document": true/false,
+  "detected_company": "삼성생명" | "한화생명" | "현대해상" | null,
+  "confidence": 0.95,
+  "reason": "판단 근거를 한 문장으로"
+}
+
+JSON만 반환하세요. 마크다운 사용 금지.
+`;
+
+/**
+ * Gemini로 이미지가 해당 보험사의 설계서인지 검증
+ * 
+ * @param apiKey - Gemini API Key
+ * @param imageSource - 이미지 URL 또는 ArrayBuffer
+ * @param targetCompany - 요청된 보험사명 (한글)
+ * @returns 검증 결과
+ */
+export async function verifyInsuranceImage(
+  apiKey: string,
+  imageSource: string | ArrayBuffer,
+  targetCompany: string
+): Promise<ImageVerificationResult> {
+  try {
+    // 이미지 데이터 준비
+    let imageData: string;
+    let mimeType: string;
+    
+    if (typeof imageSource === 'string') {
+      const fetched = await fetchImageAsBase64(imageSource);
+      imageData = fetched.data;
+      mimeType = fetched.mimeType;
+    } else {
+      imageData = arrayBufferToBase64Chunked(imageSource);
+      mimeType = 'image/png';
+    }
+    
+    // Gemini 2.0 Flash API 호출 (빠른 검증)
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: mimeType, data: imageData } },
+              { text: VERIFICATION_PROMPT }
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 512
+          }
+        })
+      }
+    );
+    
+    if (!response.ok) {
+      return {
+        is_valid: false,
+        detected_company: null,
+        is_design_document: false,
+        reason: `Gemini API error: ${response.status}`,
+        confidence: 0
+      };
+    }
+    
+    const result: GeminiAPIResponse = await response.json();
+    const textContent = result.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (!textContent) {
+      return {
+        is_valid: false,
+        detected_company: null,
+        is_design_document: false,
+        reason: 'No response from Gemini',
+        confidence: 0
+      };
+    }
+    
+    // JSON 파싱
+    let cleanedText = textContent.trim()
+      .replace(/^```json\n?/, '')
+      .replace(/^```\n?/, '')
+      .replace(/\n?```$/, '')
+      .trim();
+    
+    const parsed = JSON.parse(cleanedText);
+    
+    // 검증 로직: 설계서이고, 요청 보험사와 일치하는지
+    const isDesignDoc = parsed.is_design_document === true;
+    const detectedCompany = parsed.detected_company || null;
+    
+    // 보험사 일치 여부 체크 (부분 일치 허용)
+    const companyMatches = !targetCompany || !detectedCompany || 
+      targetCompany.includes(detectedCompany) || 
+      detectedCompany.includes(targetCompany) ||
+      normalizeCompanyName(targetCompany) === normalizeCompanyName(detectedCompany);
+    
+    const isValid = isDesignDoc && (companyMatches || !detectedCompany);
+    
+    return {
+      is_valid: isValid,
+      detected_company: detectedCompany,
+      is_design_document: isDesignDoc,
+      reason: parsed.reason || (isValid ? '설계서 검증 통과' : '설계서 아님 또는 보험사 불일치'),
+      confidence: parsed.confidence || 0.5
+    };
+    
+  } catch (error) {
+    console.error('[Gemini 검증 오류]', error);
+    return {
+      is_valid: false,
+      detected_company: null,
+      is_design_document: false,
+      reason: `검증 오류: ${error instanceof Error ? error.message : 'Unknown'}`,
+      confidence: 0
+    };
+  }
+}
+
+/**
+ * 보험사명 정규화 (비교용)
+ */
+function normalizeCompanyName(name: string): string {
+  return name
+    .replace(/생명$/, '')
+    .replace(/화재$/, '')
+    .replace(/손해보험$/, '')
+    .replace(/손보$/, '')
+    .replace(/라이프$/, '')
+    .replace(/생명보험$/, '')
+    .trim();
+}
