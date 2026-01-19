@@ -60,6 +60,63 @@ import {
 } from './r2-fallback';
 
 /**
+ * 키워드에서 상품 유형 추출
+ */
+function extractProductType(keyword: string): string | undefined {
+  const productPatterns: Record<string, string[]> = {
+    '종신': ['종신', '종신보험', 'universal', 'whole'],
+    '암': ['암', '암보험', 'cancer'],
+    '어린이': ['어린이', '자녀', '아이', '태아', 'child', 'kids'],
+    '운전자': ['운전자', '운전', 'driver'],
+    '연금': ['연금', 'pension', 'annuity'],
+    '건강': ['건강', 'health'],
+    '상해': ['상해', 'injury'],
+    '화재': ['화재', 'fire'],
+    '실손': ['실손', '실비', 'real'],
+    '치아': ['치아', 'dental']
+  };
+  
+  const keywordLower = keyword.toLowerCase();
+  
+  for (const [productType, patterns] of Object.entries(productPatterns)) {
+    for (const pattern of patterns) {
+      if (keywordLower.includes(pattern.toLowerCase())) {
+        return productType;
+      }
+    }
+  }
+  
+  return undefined;
+}
+
+/**
+ * R2 샘플 폴백 헬퍼 함수
+ * 이미지 수집 실패 시 R2에서 표준 샘플을 가져옴
+ */
+async function tryR2Fallback(
+  env: Env,
+  targetCompany: string,
+  keyword: string,
+  requestId: string
+): Promise<{ data: ArrayBuffer; sample: InsuranceSample } | null> {
+  if (!hasSampleForCompany(targetCompany)) {
+    console.log(`[${requestId}] - R2 샘플 미등록: ${targetCompany}`);
+    return null;
+  }
+  
+  const productKeyword = extractProductType(keyword);
+  const r2Sample = await getR2Sample(env, targetCompany, productKeyword);
+  
+  if (r2Sample) {
+    console.log(`[${requestId}] - ✅ R2 샘플 폴백 성공: ${r2Sample.sample.sample_key}`);
+    return r2Sample;
+  }
+  
+  console.log(`[${requestId}] - R2 샘플 로드 실패: ${targetCompany}`);
+  return null;
+}
+
+/**
  * 메인 파이프라인 실행
  */
 export async function executePipeline(
@@ -163,26 +220,35 @@ export async function executePipeline(
         });
         
         if (!screenshotResult.success || !screenshotResult.image_data) {
-          await updateImageLog(env.DB, requestId, { 
-            status: 'failed', 
-            error_message: screenshotResult.error || searchResult.error 
-          });
-          return createErrorResponse(requestId, 'SCRAPING_FAILED', '이미지 수집 실패');
+          // ✅ 스크린샷 실패 시 R2 샘플로 자동 교체
+          console.log(`[${requestId}] - 스크린샷 실패, R2 샘플로 교체 시도...`);
+          const r2Fallback = await tryR2Fallback(env, request.request_info.target_company, request.request_info.keyword, requestId);
+          if (r2Fallback) {
+            imageData = r2Fallback.data;
+            sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+          } else {
+            await updateImageLog(env.DB, requestId, { status: 'failed', error_message: 'R2 샘플도 없음' });
+            return createErrorResponse(requestId, 'SCRAPING_FAILED', '이미지 수집 실패. R2 샘플 업로드가 필요합니다.');
+          }
+        } else {
+          // ✅ 스크린샷 이미지 유효성 검증
+          const screenshotValidation = validateImageData(screenshotResult.image_data);
+          if (!screenshotValidation.valid) {
+            console.log(`[${requestId}] - 스크린샷 검증 실패 (${screenshotValidation.error}), R2 샘플로 교체...`);
+            const r2Fallback = await tryR2Fallback(env, request.request_info.target_company, request.request_info.keyword, requestId);
+            if (r2Fallback) {
+              imageData = r2Fallback.data;
+              sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+            } else {
+              // R2도 없으면 그냥 진행 (경고만)
+              console.log(`[${requestId}] - ⚠️ R2 없음, 원본 스크린샷으로 계속`);
+              imageData = screenshotResult.image_data;
+            }
+          } else {
+            imageData = screenshotResult.image_data;
+          }
         }
-        
-        // ✅ 스크린샷 이미지 유효성 검증
-        const screenshotValidation = validateImageData(screenshotResult.image_data);
-        if (!screenshotValidation.valid) {
-          console.log(`[${requestId}] - 스크린샷 검증 실패: ${screenshotValidation.error}`);
-          await updateImageLog(env.DB, requestId, { 
-            status: 'failed', 
-            error_message: `Invalid image file: ${screenshotValidation.error}` 
-          });
-          return createErrorResponse(requestId, 'INVALID_IMAGE', `스크린샷 이미지 검증 실패: ${screenshotValidation.error}`);
-        }
-        
-        imageData = screenshotResult.image_data;
-        sourceUrl = searchUrl;
+        sourceUrl = sourceUrl || searchUrl;
       } else {
         searchTargets = searchResult.targets;
         console.log(`[${requestId}] - 네이버 검색 결과: ${searchTargets.length}개 타겟 발견`);
@@ -206,32 +272,37 @@ export async function executePipeline(
           const downloadResult = await downloadImage(sourceUrl);
           
           if (!downloadResult.success || !downloadResult.data) {
-            // 이미지 다운로드 실패 시 스크린샷으로 폴백
-            console.log(`[${requestId}] - 이미지 다운로드 실패, 스크린샷으로 전환`);
-            const screenshotResult = await captureScreenshot(env.BROWSERLESS_API_KEY, {
-              url: sourceUrl,
-              options: { type: 'png', viewport: { width: 1920, height: 1080 } }
-            });
+            // ✅ 이미지 다운로드 실패 (HTML 페이지 등) 시 R2 샘플로 자동 교체
+            console.log(`[${requestId}] - 이미지 다운로드 실패: ${downloadResult.error}`);
+            console.log(`[${requestId}] - R2 샘플로 자동 교체 시도...`);
             
-            if (!screenshotResult.success || !screenshotResult.image_data) {
-              await updateImageLog(env.DB, requestId, { 
-                status: 'failed', 
-                error_message: '이미지 수집 실패' 
+            const r2Fallback = await tryR2Fallback(env, request.request_info.target_company, request.request_info.keyword, requestId);
+            if (r2Fallback) {
+              imageData = r2Fallback.data;
+              sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+            } else {
+              // R2도 없으면 스크린샷 시도
+              console.log(`[${requestId}] - R2 없음, 스크린샷으로 폴백...`);
+              const screenshotResult = await captureScreenshot(env.BROWSERLESS_API_KEY, {
+                url: sourceUrl,
+                options: { type: 'png', viewport: { width: 1920, height: 1080 } }
               });
-              return createErrorResponse(requestId, 'SCRAPING_FAILED', '이미지 수집 실패');
+              
+              if (screenshotResult.success && screenshotResult.image_data) {
+                const validation = validateImageData(screenshotResult.image_data);
+                if (validation.valid) {
+                  imageData = screenshotResult.image_data;
+                } else {
+                  // 스크린샷도 실패 - 경고 후 계속 (임시)
+                  console.log(`[${requestId}] - ⚠️ 모든 폴백 실패, R2 샘플 업로드 필요`);
+                  await updateImageLog(env.DB, requestId, { status: 'failed', error_message: 'R2 샘플 필요' });
+                  return createErrorResponse(requestId, 'INVALID_IMAGE', `이미지 수집 실패. ${request.request_info.target_company} R2 샘플 업로드가 필요합니다.`);
+                }
+              } else {
+                await updateImageLog(env.DB, requestId, { status: 'failed', error_message: 'R2 샘플 필요' });
+                return createErrorResponse(requestId, 'SCRAPING_FAILED', `이미지 수집 실패. ${request.request_info.target_company} R2 샘플 업로드가 필요합니다.`);
+              }
             }
-            
-            // ✅ 폴백 스크린샷 이미지 유효성 검증
-            const fallbackValidation = validateImageData(screenshotResult.image_data);
-            if (!fallbackValidation.valid) {
-              console.log(`[${requestId}] - 폴백 스크린샷 검증 실패: ${fallbackValidation.error}`);
-              await updateImageLog(env.DB, requestId, { 
-                status: 'failed', 
-                error_message: `Invalid image file: ${fallbackValidation.error}` 
-              });
-              return createErrorResponse(requestId, 'INVALID_IMAGE', `폴백 이미지 검증 실패: ${fallbackValidation.error}`);
-            }
-            imageData = screenshotResult.image_data;
           } else {
             imageData = downloadResult.data;
           }
@@ -247,25 +318,33 @@ export async function executePipeline(
           });
           
           if (!screenshotResult.success || !screenshotResult.image_data) {
-            await updateImageLog(env.DB, requestId, { 
-              status: 'failed', 
-              error_message: screenshotResult.error 
-            });
-            return createErrorResponse(requestId, 'SCRAPING_FAILED', '블로그 스크린샷 실패');
+            // ✅ 블로그 스크린샷 실패 시 R2 샘플로 교체
+            console.log(`[${requestId}] - 블로그 스크린샷 실패, R2 샘플로 교체 시도...`);
+            const r2Fallback = await tryR2Fallback(env, request.request_info.target_company, request.request_info.keyword, requestId);
+            if (r2Fallback) {
+              imageData = r2Fallback.data;
+              sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+            } else {
+              await updateImageLog(env.DB, requestId, { status: 'failed', error_message: 'R2 샘플 필요' });
+              return createErrorResponse(requestId, 'SCRAPING_FAILED', `블로그 스크린샷 실패. ${request.request_info.target_company} R2 샘플 업로드가 필요합니다.`);
+            }
+          } else {
+            // ✅ 블로그 스크린샷 이미지 유효성 검증
+            const blogScreenshotValidation = validateImageData(screenshotResult.image_data);
+            if (!blogScreenshotValidation.valid) {
+              console.log(`[${requestId}] - 블로그 스크린샷 검증 실패 (${blogScreenshotValidation.error}), R2 샘플로 교체...`);
+              const r2Fallback = await tryR2Fallback(env, request.request_info.target_company, request.request_info.keyword, requestId);
+              if (r2Fallback) {
+                imageData = r2Fallback.data;
+                sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+              } else {
+                console.log(`[${requestId}] - ⚠️ R2 없음, 원본 스크린샷으로 계속`);
+                imageData = screenshotResult.image_data;
+              }
+            } else {
+              imageData = screenshotResult.image_data;
+            }
           }
-          
-          // ✅ 블로그 스크린샷 이미지 유효성 검증
-          const blogScreenshotValidation = validateImageData(screenshotResult.image_data);
-          if (!blogScreenshotValidation.valid) {
-            console.log(`[${requestId}] - 블로그 스크린샷 검증 실패: ${blogScreenshotValidation.error}`);
-            await updateImageLog(env.DB, requestId, { 
-              status: 'failed', 
-              error_message: `Invalid image file: ${blogScreenshotValidation.error}` 
-            });
-            return createErrorResponse(requestId, 'INVALID_IMAGE', `블로그 스크린샷 검증 실패: ${blogScreenshotValidation.error}`);
-          }
-          
-          imageData = screenshotResult.image_data;
         }
       }
     }
@@ -623,34 +702,4 @@ function createErrorResponse(
     },
     request_id: requestId
   };
-}
-
-/**
- * 키워드에서 상품 유형 추출
- */
-function extractProductType(keyword: string): string | undefined {
-  const productPatterns: Record<string, string[]> = {
-    '종신': ['종신', '종신보험', 'universal', 'whole'],
-    '암': ['암', '암보험', 'cancer'],
-    '어린이': ['어린이', '자녀', '아이', '태아', 'child', 'kids'],
-    '운전자': ['운전자', '운전', 'driver'],
-    '연금': ['연금', 'pension', 'annuity'],
-    '건강': ['건강', 'health'],
-    '상해': ['상해', 'injury'],
-    '화재': ['화재', 'fire'],
-    '실손': ['실손', '실비', 'real'],
-    '치아': ['치아', 'dental']
-  };
-  
-  const keywordLower = keyword.toLowerCase();
-  
-  for (const [productType, patterns] of Object.entries(productPatterns)) {
-    for (const pattern of patterns) {
-      if (keywordLower.includes(pattern.toLowerCase())) {
-        return productType;
-      }
-    }
-  }
-  
-  return undefined;
 }
