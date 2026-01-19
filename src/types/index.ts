@@ -24,6 +24,10 @@ export interface Env {
   BROWSERLESS_API_KEY: string;
   CLOUDINARY_API_KEY: string;
   CLOUDINARY_API_SECRET: string;
+  
+  // 네이버 검색 API
+  NAVER_CLIENT_ID: string;
+  NAVER_CLIENT_SECRET: string;
 }
 
 // ============================================

@@ -34,7 +34,9 @@
   
   // 시크릿 키 (wrangler secret put으로 설정)
   // XIVIX_API_KEY: API 인증 키
-  // GEMINI_API_KEY: Google Gemini API 키
+  // GEMINI_API_KEY: Google Gemini 2.0 Flash API 키
+  // NAVER_CLIENT_ID: 네이버 검색 API Client ID
+  // NAVER_CLIENT_SECRET: 네이버 검색 API Client Secret
   // BROWSERLESS_API_KEY: Browserless.io API 키
   // CLOUDINARY_API_KEY: Cloudinary API 키
   // CLOUDINARY_API_SECRET: Cloudinary API 시크릿

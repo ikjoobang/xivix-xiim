@@ -239,21 +239,10 @@ api.post('/preview-transform', async (c) => {
 
 /**
  * POST /api/test-gemini
- * Gemini 분석 테스트 (개발용)
+ * Gemini 2.0 Flash 분석 테스트 (개발용)
  */
 api.post('/test-gemini', async (c) => {
   try {
-    const apiKey = c.req.header('X-API-Key');
-    
-    if (!apiKey) {
-      return c.json({ error: 'API key required' }, 401);
-    }
-    
-    const authResult = await authenticateUser(c.env.DB, apiKey);
-    if (!authResult.success || authResult.user?.tier !== 'enterprise') {
-      return c.json({ error: 'Enterprise tier required' }, 403);
-    }
-    
     const { image_url } = await c.req.json();
     
     if (!image_url) {
@@ -270,7 +259,73 @@ api.post('/test-gemini', async (c) => {
     
     return c.json(result);
   } catch (error) {
-    return c.json({ error: 'Gemini test failed' }, 500);
+    return c.json({ error: 'Gemini test failed', details: error instanceof Error ? error.message : 'Unknown' }, 500);
+  }
+});
+
+/**
+ * GET /api/test-naver
+ * 네이버 검색 API 테스트
+ */
+api.get('/test-naver', async (c) => {
+  try {
+    const keyword = c.req.query('keyword') || '삼성생명 설계안';
+    
+    const { searchInsuranceContent } = await import('../services/naver');
+    const result = await searchInsuranceContent(
+      c.env.NAVER_CLIENT_ID,
+      c.env.NAVER_CLIENT_SECRET,
+      keyword
+    );
+    
+    return c.json({
+      keyword,
+      ...result,
+      count: result.targets?.length || 0
+    });
+  } catch (error) {
+    return c.json({ 
+      error: '네이버 검색 테스트 실패', 
+      details: error instanceof Error ? error.message : 'Unknown' 
+    }, 500);
+  }
+});
+
+/**
+ * GET /api/test-pipeline
+ * 전체 파이프라인 간단 테스트 (source_url 필수)
+ */
+api.get('/test-pipeline', async (c) => {
+  try {
+    const imageUrl = c.req.query('image_url');
+    
+    if (!imageUrl) {
+      return c.json({ 
+        error: 'image_url 쿼리 파라미터가 필요합니다',
+        example: '/api/test-pipeline?image_url=https://example.com/image.png'
+      }, 400);
+    }
+    
+    // 간단한 테스트용 요청
+    const testRequest = {
+      api_key: 'dev_test_api_key_12345',
+      request_info: {
+        keyword: '테스트 설계안',
+        target_company: 'SAMSUNG_LIFE',
+        user_id: 'test_user',
+        source_url: imageUrl
+      }
+    };
+    
+    const { executePipeline } = await import('../services/pipeline');
+    const result = await executePipeline(c.env, testRequest);
+    
+    return c.json(result);
+  } catch (error) {
+    return c.json({ 
+      error: '파이프라인 테스트 실패', 
+      details: error instanceof Error ? error.message : 'Unknown' 
+    }, 500);
   }
 });
 
