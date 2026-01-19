@@ -599,30 +599,24 @@ export async function executePipeline(
     console.log(`[${requestId}] - 회전: ${variationParams.rotation}°, 밝기: ${variationParams.brightness}, 크롭: ${variationParams.crop_scale}`);
     
     // ============================================
-    // Step 7: 가공 (Masking) - Cloudinary URL 생성
+    // Step 7: 가공 (Masking) - Cloudinary URL 생성 + 동적 타이틀 합성
     // ============================================
     context.current_step = 'masking';
-    console.log(`[${requestId}] Step 7: Cloudinary URL 변환으로 마스킹 적용 중...`);
+    console.log(`[${requestId}] Step 7: Cloudinary URL 변환으로 마스킹 + 동적 타이틀 적용 중...`);
     
-    // 컨텍스트 오버레이 적용 여부 결정
-    // R2 폴백 사용 시에만 텍스트 오버레이 적용 (시각적 맥락 동기화)
-    let urlResult;
-    if (context.useR2Fallback && context.contextOverlayText) {
-      console.log(`[${requestId}] - 컨텍스트 오버레이 적용: "${context.contextOverlayText}"`);
-      urlResult = await generateUniqueImageUrlWithContext(
-        env.CLOUDINARY_CLOUD_NAME,
-        context.cloudinary_public_id!,
-        maskingZones,
-        context.user_id,
-        context.contextOverlayText
-      );
-    } else {
-      urlResult = await generateUniqueImageUrl(
-        env.CLOUDINARY_CLOUD_NAME,
-        context.cloudinary_public_id!,
-        maskingZones,
-        context.user_id
-      );
+    // 지시사항: 모든 케이스에 동적 타이틀 합성 적용
+    // 순서: 마스킹 파라미터 → 타이틀 파라미터 (마스킹 후 텍스트 얹기)
+    const urlResult = await generateUniqueImageUrlWithContext(
+      env.CLOUDINARY_CLOUD_NAME,
+      context.cloudinary_public_id!,
+      maskingZones,
+      context.user_id,
+      request.request_info.keyword  // 원본 키워드로 동적 타이틀 생성
+    );
+    
+    console.log(`[${requestId}] - 동적 타이틀 합성 완료 (키워드: ${request.request_info.keyword})`);
+    if (context.useR2Fallback) {
+      console.log(`[${requestId}] - R2 폴백 모드: 골든 샘플 + 동적 타이틀`);
     }
     
     context.final_url = urlResult.url;

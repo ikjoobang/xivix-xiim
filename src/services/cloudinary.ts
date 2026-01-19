@@ -223,10 +223,43 @@ export async function generateSignedUploadUrl(
 }
 
 /**
- * 동적 텍스트 오버레이 생성 (Context Overlay)
- * 질문의 핵심 요약을 이미지 좌측 상단에 워터마크로 삽입
+ * 키워드 정제 함수: 긴 질문을 간결한 타이틀로 요약
  * 
- * @param text - 오버레이 텍스트
+ * @example
+ * "30대 워킹맘을 위한 삼성생명 암보험 추천해줘" → "[30대 워킹맘 삼성생명 맞춤안]"
+ */
+export function generateDynamicTitle(keyword: string | undefined): string {
+  if (!keyword) return "맞춤 설계안 예시";
+
+  // 불필요한 조사나 어미 제거
+  let cleanKeyword = keyword
+    .replace(/을 위한|를 위한|에 대한|에 관한/gi, " ")
+    .replace(/추천해줘|추천해주세요|알려줘|알려주세요|보여줘|보여주세요/gi, " ")
+    .replace(/해줘|해주세요|줘|주세요/gi, " ")
+    .replace(/좀|좀요|요|있을까요|있나요|할까요|할까/gi, " ")
+    .replace(/설계안|설계서|보장분석표|가입설계서/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // 너무 길면 잘라서 '..' 처리
+  if (cleanKeyword.length > 20) {
+    cleanKeyword = cleanKeyword.substring(0, 19) + "..";
+  }
+
+  if (cleanKeyword.length === 0) {
+    return "맞춤 설계안 예시";
+  }
+
+  return `[${cleanKeyword} 맞춤안]`;
+}
+
+/**
+ * 동적 텍스트 오버레이 생성 (Context Overlay)
+ * 질문의 핵심 요약을 이미지 상단 중앙에 워터마크로 삽입
+ * 
+ * 디자인: Noto Sans KR 40px, 흰색 글자, 검정 반투명 배경 박스
+ * 
+ * @param text - 오버레이 텍스트 (정제된 타이틀)
  * @param options - 스타일 옵션
  */
 export function buildTextOverlayString(
@@ -241,46 +274,66 @@ export function buildTextOverlayString(
   } = {}
 ): string {
   const {
-    position = 'north_west',
-    fontSize = 24,
+    position = 'north',  // 상단 중앙 (지시사항 반영)
+    fontSize = 40,       // 40px (지시사항 반영)
     fontColor = 'white',
-    backgroundColor = '333333',
-    padding = 10,
-    opacity = 80
+    backgroundColor = '000000',  // 검정색 (지시사항 반영)
+    padding = 20,        // 박스 내부 여백 20px (지시사항 반영)
+    opacity = 70         // 70% 투명도 (지시사항 반영)
   } = options;
   
-  // URL 인코딩된 텍스트 (Cloudinary 규격)
-  // 한글 및 특수문자 처리
+  // 한글 깨짐 방지를 위한 URL 인코딩
   const encodedText = encodeURIComponent(text)
-    .replace(/%20/g, '%20')
-    .replace(/\(/g, '%28')
-    .replace(/\)/g, '%29');
+    .replace(/%5B/g, '[')
+    .replace(/%5D/g, ']');
   
-  // Cloudinary 텍스트 오버레이 포맷:
-  // l_text:Arial_24_bold:텍스트,co_white,bo_4px_solid_333333/fl_layer_apply,g_north_west,x_10,y_10
+  // Cloudinary 텍스트 오버레이 포맷 (지시사항 규격):
+  // l_text:폰트_크기_스타일:내용 (레이어 텍스트 추가)
+  // co_white (글자색 흰색)
+  // b_black_o_70 (배경색 검정, 투명도 70% 박스)
+  // p_20 (박스 내부 여백 20px)
+  // g_north (위치: 상단 중앙 정렬)
+  // y_30 (상단에서 30px 아래로 띄움)
   const textOverlay = [
     `l_text:NotoSansKR-Bold.otf_${fontSize}_bold:${encodedText}`,
     `co_${fontColor}`,
-    `b_rgb:${backgroundColor}`,
-    `o_${opacity}`
+    `b_rgb:${backgroundColor}_o_${opacity}`,
+    `bo_2px_solid_rgb:4a90d9`  // 파란색 테두리
   ].join(',');
   
-  // 위치 및 패딩 적용
-  const layerApply = `fl_layer_apply,g_${position},x_${padding},y_${padding}`;
+  // 위치 적용: 상단 중앙, 30px 아래로 띄움
+  const layerApply = `fl_layer_apply,g_${position},y_30`;
   
   return `${textOverlay}/${layerApply}`;
 }
 
 /**
+ * 키워드에서 동적 타이틀 생성 후 오버레이 파라미터 반환
+ * 원스텝 함수: 키워드 → 정제 → Cloudinary 파라미터
+ */
+export function buildDynamicTitleOverlay(keyword: string | undefined): string {
+  const title = generateDynamicTitle(keyword);
+  return buildTextOverlayString(title);
+}
+
+/**
  * 컨텍스트 기반 최종 URL 생성
- * 변주 + 마스킹 + 텍스트 오버레이 통합
+ * 변주 + 마스킹 + 동적 타이틀 오버레이 통합
+ * 
+ * 중요: 마스킹 파라미터 뒤에 타이틀 파라미터를 이어 붙임 (순서 중요)
+ * 
+ * @param cloudName - Cloudinary 클라우드 이름
+ * @param publicId - 업로드된 이미지 ID
+ * @param zones - 마스킹 좌표 배열
+ * @param userId - 사용자 ID
+ * @param keyword - 원본 키워드 (동적 타이틀 생성용)
  */
 export async function generateUniqueImageUrlWithContext(
   cloudName: string,
   publicId: string,
   zones: MaskingZone[],
   userId: string,
-  contextText?: string
+  keyword?: string
 ): Promise<CloudinaryUrlResult> {
   const baseUrl = `https://res.cloudinary.com/${cloudName}/image/upload`;
   
@@ -300,20 +353,16 @@ export async function generateUniqueImageUrlWithContext(
   };
   const maskingString = buildMaskingTransformString(maskingParams);
   
-  // 4. 텍스트 오버레이 생성 (옵션)
+  // 4. 동적 타이틀 오버레이 생성 (키워드에서 정제된 타이틀)
+  // 지시사항: 마스킹 후 → 텍스트 얹기 순서
   let textOverlayString = '';
-  if (contextText) {
-    textOverlayString = buildTextOverlayString(contextText, {
-      position: 'north_west',
-      fontSize: 20,
-      fontColor: 'white',
-      backgroundColor: '1a1a2e',
-      padding: 15,
-      opacity: 90
-    });
+  if (keyword) {
+    // 키워드를 정제하여 "[30대 워킹맘 삼성생명 맞춤안]" 형식의 타이틀 생성
+    textOverlayString = buildDynamicTitleOverlay(keyword);
+    console.log(`[Cloudinary] 동적 타이틀 생성: ${generateDynamicTitle(keyword)}`);
   }
   
-  // 5. 전체 변형 문자열 조합
+  // 5. 전체 변형 문자열 조합 (순서: 변주 → 마스킹 → 타이틀)
   const transformParts = [variationString, maskingString, textOverlayString].filter(Boolean);
   const transformString = transformParts.join('/');
   
