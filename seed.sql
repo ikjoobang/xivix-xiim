@@ -1,10 +1,11 @@
 -- XIVIX XIIM 테스트 데이터
 
--- 테스트 사용자 추가
+-- 테스트 사용자 추가 (API Key: dev_test_api_key_12345)
 INSERT OR IGNORE INTO users (user_id, api_key_hash, company, tier, daily_limit) VALUES 
-  ('designer_01', 'hash_test_001', '테스트 대리점', 'basic', 100),
-  ('designer_02', 'hash_test_002', 'XIVIX 내부', 'enterprise', 1000),
-  ('admin', 'hash_admin_001', 'XIVIX', 'enterprise', 10000);
+  ('test_user', '3722f055217bacf6eb9546ab6a09d4eb9e2df57eee6bf81019dfaed1551e98fd', '테스트', 'enterprise', 1000),
+  ('designer_01', '3722f055217bacf6eb9546ab6a09d4eb9e2df57eee6bf81019dfaed1551e98fd', '테스트 대리점', 'basic', 100),
+  ('designer_02', '3722f055217bacf6eb9546ab6a09d4eb9e2df57eee6bf81019dfaed1551e98fd', 'XIVIX 내부', 'enterprise', 1000),
+  ('admin', '3722f055217bacf6eb9546ab6a09d4eb9e2df57eee6bf81019dfaed1551e98fd', 'XIVIX', 'enterprise', 10000);
 
 -- 19개 생명보험사 데이터
 INSERT OR IGNORE INTO insurance_companies (code, name_ko, name_en, category) VALUES 

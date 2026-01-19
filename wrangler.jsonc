@@ -28,7 +28,7 @@
   
   // 환경 변수 (프로덕션에서는 wrangler secret으로 설정)
   "vars": {
-    "CLOUDINARY_CLOUD_NAME": "xivix",
+    "CLOUDINARY_CLOUD_NAME": "df8yybjcg",
     "CLOUDINARY_UPLOAD_PRESET": "xivix_unsigned"
   }
   
