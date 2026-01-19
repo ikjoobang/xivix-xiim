@@ -1,6 +1,9 @@
 /**
  * XIVIX XIIM - API Routes
  * Hono 라우터 정의
+ * 
+ * 보안: Referrer 제한 적용
+ * 허용 도메인: *.xivix-2026-pro.pages.dev, *.xivix-xiim.pages.dev, localhost
  */
 
 import { Hono } from 'hono';
@@ -18,13 +21,97 @@ import { generateVariationParams, buildVariationTransformString } from '../servi
 
 const api = new Hono<{ Bindings: Env }>();
 
-// CORS 설정
+// ============================================
+// 허용 도메인 목록 (보안 설정)
+// ============================================
+const ALLOWED_ORIGINS = [
+  // XIVIX 메인 웹 (운영)
+  'https://xivix-2026-pro.pages.dev',
+  /^https:\/\/[a-z0-9-]+\.xivix-2026-pro\.pages\.dev$/,
+  // XIIM 미들웨어 자체
+  'https://xivix-xiim.pages.dev',
+  /^https:\/\/[a-z0-9-]+\.xivix-xiim\.pages\.dev$/,
+  // 개발 환경
+  'http://localhost:3000',
+  'http://localhost:5173',
+  /^https:\/\/[a-z0-9-]+\.sandbox\.novita\.ai$/
+];
+
+/**
+ * Origin 검증 함수
+ */
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  
+  for (const allowed of ALLOWED_ORIGINS) {
+    if (typeof allowed === 'string') {
+      if (origin === allowed) return true;
+    } else if (allowed instanceof RegExp) {
+      if (allowed.test(origin)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Referrer 검증 함수
+ */
+function isAllowedReferrer(referrer: string | undefined): boolean {
+  if (!referrer) return true; // Referrer 없으면 Origin으로 검증
+  
+  try {
+    const url = new URL(referrer);
+    const origin = `${url.protocol}//${url.host}`;
+    return isAllowedOrigin(origin);
+  } catch {
+    return false;
+  }
+}
+
+// ============================================
+// CORS 설정 (동적 Origin 검증)
+// ============================================
 api.use('/*', cors({
-  origin: ['https://xivix-2026-pro.pages.dev', 'http://localhost:3000', 'http://localhost:5173'],
+  origin: (origin) => {
+    if (isAllowedOrigin(origin)) {
+      return origin;
+    }
+    return null;
+  },
   allowMethods: ['GET', 'POST', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
+  allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'Referer'],
   credentials: true
 }));
+
+// ============================================
+// Referrer 제한 미들웨어 (/api/process 전용)
+// ============================================
+api.use('/process', async (c, next) => {
+  const origin = c.req.header('Origin');
+  const referrer = c.req.header('Referer');
+  
+  // Origin 또는 Referrer 중 하나라도 허용 목록에 있어야 함
+  const originAllowed = isAllowedOrigin(origin);
+  const referrerAllowed = isAllowedReferrer(referrer);
+  
+  // 개발 환경에서는 완화 (API 테스트용)
+  const isDev = c.req.header('X-Dev-Mode') === 'true';
+  
+  if (!originAllowed && !referrerAllowed && !isDev) {
+    console.warn(`[SECURITY] Blocked request - Origin: ${origin}, Referrer: ${referrer}`);
+    return c.json({
+      status: 'error',
+      error: {
+        code: 'FORBIDDEN',
+        message: '허용되지 않은 도메인에서의 API 호출입니다.',
+        allowed_domains: ['*.xivix-2026-pro.pages.dev', '*.xivix-xiim.pages.dev']
+      },
+      request_id: 'blocked'
+    }, 403);
+  }
+  
+  await next();
+});
 
 // ============================================
 // Health Check

@@ -4,6 +4,9 @@
  * 
  * 업데이트: 네이버 검색 API 통합 + Gemini 2.0 Flash
  * 흐름: 네이버 API -> Browserless -> Gemini -> Cloudinary
+ * 
+ * 성능 목표: 10초 이내 처리 완료
+ * 최적화: 병렬 처리, 타임아웃, 캠싱
  */
 
 import type { 
@@ -229,12 +232,12 @@ export async function executePipeline(
     context.source_image_url = sourceUrl;
     
     // ============================================
-    // Step 4: 원본 저장 (Raw Storage)
+    // Step 4-5: 원본 저장 + AI 분석 (병렬 처리로 성능 최적화)
     // ============================================
     context.current_step = 'raw_storage';
-    console.log(`[${requestId}] Step 4: 원본 이미지 저장 중... (R2 + Cloudinary)`);
+    console.log(`[${requestId}] Step 4-5: 원본 저장 + AI 분석 (병렬 처리)...`);
     
-    // 이미지 해시 생성
+    // 해시 계산 (빠름)
     const sourceHash = await hashArrayBuffer(imageData);
     context.source_hash = sourceHash;
     
@@ -245,88 +248,123 @@ export async function executePipeline(
     // 해시 중복 체크 (동일 원본 + 동일 시드 조합 방지)
     const duplicateCheck = await checkHashDuplicate(env.DB, sourceHash, variantSeed);
     if (duplicateCheck.isDuplicate) {
-      // 새로운 시드 재생성
-      variantSeed = await generateVariantSeed(context.user_id + '_' + Date.now());
+      // 새로운 시드 재생성 (최대 3회 시도)
+      for (let i = 0; i < 3; i++) {
+        variantSeed = await generateVariantSeed(context.user_id + '_' + Date.now() + '_' + i);
+        const recheck = await checkHashDuplicate(env.DB, sourceHash, variantSeed);
+        if (!recheck.isDuplicate) break;
+      }
       context.variant_seed = variantSeed;
       console.log(`[${requestId}] - 중복 감지, 새 시드 생성: ${variantSeed}`);
     }
     
-    // R2에 원본 저장 (24시간 후 자동 삭제 설정은 R2 Lifecycle로)
     const rawKey = `raw/${requestId}_${Date.now()}.png`;
-    try {
-      await env.R2_RAW.put(rawKey, imageData, {
-        customMetadata: {
-          request_id: requestId,
-          user_id: context.user_id,
-          source_hash: sourceHash,
-          source_url: sourceUrl
+    const imageDimensions = DEFAULT_IMAGE_DIMENSIONS;
+    context.image_dimensions = imageDimensions;
+    
+    // 병렬 처리: R2 저장 + Cloudinary 업로드 + Gemini 분석
+    const [r2Result, uploadResult, analysisResult] = await Promise.allSettled([
+      // R2 저장 (24시간 후 자동 삭제 설정은 R2 Lifecycle로)
+      (async () => {
+        try {
+          await env.R2_RAW.put(rawKey, imageData, {
+            customMetadata: {
+              request_id: requestId,
+              user_id: context.user_id,
+              source_hash: sourceHash,
+              source_url: sourceUrl
+            }
+          });
+          return { success: true };
+        } catch (err) {
+          console.log(`[${requestId}] - R2 저장 스킵`);
+          return { success: false };
         }
-      });
-    } catch (r2Error) {
-      console.log(`[${requestId}] - R2 저장 스킵 (로컬 개발 환경)`);
-    }
+      })(),
+      
+      // Cloudinary 업로드
+      uploadToCloudinary(
+        env.CLOUDINARY_CLOUD_NAME,
+        env.CLOUDINARY_API_KEY,
+        env.CLOUDINARY_API_SECRET,
+        imageData,
+        `${requestId}.png`,
+        'xivix/raw'
+      ),
+      
+      // Gemini AI 분석 (타임아웃 8초)
+      Promise.race([
+        analyzeImageWithGemini(env.GEMINI_API_KEY, imageData, imageDimensions),
+        new Promise<{ success: false; zones: []; error: string }>((_, reject) => 
+          setTimeout(() => reject({ success: false, zones: [], error: 'AI 분석 타임아웃 (8s)' }), 8000)
+        )
+      ])
+    ]);
     
-    // Cloudinary에 업로드 (Signed Upload)
-    const uploadResult = await uploadToCloudinary(
-      env.CLOUDINARY_CLOUD_NAME,
-      env.CLOUDINARY_API_KEY,
-      env.CLOUDINARY_API_SECRET,
-      imageData,
-      `${requestId}.png`,
-      'xivix/raw'
-    );
-    
-    if (!uploadResult.success || !uploadResult.public_id) {
-      // Cloudinary 업로드 실패 시에도 계속 진행 (데모용)
+    // Cloudinary 결과 처리
+    const cloudinaryResult = uploadResult.status === 'fulfilled' ? uploadResult.value : null;
+    if (!cloudinaryResult?.success || !cloudinaryResult?.public_id) {
       console.log(`[${requestId}] - Cloudinary 업로드 실패, 데모 모드로 계속`);
       context.cloudinary_public_id = `demo/${requestId}`;
     } else {
-      context.cloudinary_public_id = uploadResult.public_id;
+      context.cloudinary_public_id = cloudinaryResult.public_id;
     }
     
-    await updateImageLog(env.DB, requestId, {
+    // DB 로그 업데이트 (비동기)
+    updateImageLog(env.DB, requestId, {
       source_hash: sourceHash,
       variant_seed: variantSeed,
       raw_r2_key: rawKey,
       cloudinary_public_id: context.cloudinary_public_id
-    });
+    }).catch(err => console.error(`[${requestId}] DB 업데이트 실패:`, err));
     
-    // ============================================
-    // Step 5: AI 비전 분석 (Gemini 2.0 Flash)
-    // ============================================
+    // AI 분석 결과 처리
     context.current_step = 'ai_analysis';
-    console.log(`[${requestId}] Step 5: Gemini 2.0 Flash로 이미지 분석 중...`);
-    
-    const imageDimensions = DEFAULT_IMAGE_DIMENSIONS;
-    context.image_dimensions = imageDimensions;
-    
-    const analysisResult = await analyzeImageWithGemini(
-      env.GEMINI_API_KEY,
-      imageData,
-      imageDimensions
-    );
     
     let maskingZones: MaskingZone[];
+    const geminiResult = analysisResult.status === 'fulfilled' ? analysisResult.value : null;
     
-    if (analysisResult.success && analysisResult.zones.length > 0) {
-      maskingZones = filterHighConfidenceZones(analysisResult.zones, 0.5);
+    if (geminiResult?.success && geminiResult.zones.length > 0) {
+      maskingZones = filterHighConfidenceZones(geminiResult.zones, 0.5);
       console.log(`[${requestId}] - Gemini 분석 완료: ${maskingZones.length}개 마스킹 영역 감지`);
       
-      if (analysisResult.insurance_info) {
-        console.log(`[${requestId}] - 보험사 감지: ${analysisResult.insurance_info.company || '미확인'}`);
+      if (geminiResult.insurance_info) {
+        console.log(`[${requestId}] - 보험사 감지: ${geminiResult.insurance_info.company || '미확인'}`);
       }
     } else {
-      // 기본 마스킹 영역 설정 (중앙부)
-      console.log(`[${requestId}] - 마스킹 영역 미감지, 기본 마스킹 적용`);
-      maskingZones = [{
-        type: 'other',
-        x: Math.round(imageDimensions.width * 0.15),
-        y: Math.round(imageDimensions.height * 0.1),
-        width: Math.round(imageDimensions.width * 0.7),
-        height: Math.round(imageDimensions.height * 0.2),
-        confidence: 0.5,
-        description: '기본 상단 마스킹'
-      }];
+      // 기본 마스킹 영역 설정 (중앙부 - 성명/로고/보험료/연락처 영역)
+      console.log(`[${requestId}] - 마스킹 영역 미감지 또는 타임아웃, 기본 마스킹 적용`);
+      maskingZones = [
+        // 상단 영역 (로고, 성명)
+        {
+          type: 'name',
+          x: Math.round(imageDimensions.width * 0.05),
+          y: Math.round(imageDimensions.height * 0.02),
+          width: Math.round(imageDimensions.width * 0.3),
+          height: Math.round(imageDimensions.height * 0.05),
+          confidence: 0.5,
+          description: '기본 상단 좌측 마스킹'
+        },
+        {
+          type: 'logo',
+          x: Math.round(imageDimensions.width * 0.7),
+          y: Math.round(imageDimensions.height * 0.02),
+          width: Math.round(imageDimensions.width * 0.25),
+          height: Math.round(imageDimensions.height * 0.08),
+          confidence: 0.5,
+          description: '기본 상단 우측 로고 마스킹'
+        },
+        // 하단 영역 (연락처, 설계사 정보)
+        {
+          type: 'phone',
+          x: Math.round(imageDimensions.width * 0.05),
+          y: Math.round(imageDimensions.height * 0.9),
+          width: Math.round(imageDimensions.width * 0.4),
+          height: Math.round(imageDimensions.height * 0.08),
+          confidence: 0.5,
+          description: '기본 하단 연락처 마스킹'
+        }
+      ];
     }
     
     context.masking_zones = maskingZones;
