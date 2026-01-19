@@ -223,6 +223,112 @@ export async function generateSignedUploadUrl(
 }
 
 /**
+ * 동적 텍스트 오버레이 생성 (Context Overlay)
+ * 질문의 핵심 요약을 이미지 좌측 상단에 워터마크로 삽입
+ * 
+ * @param text - 오버레이 텍스트
+ * @param options - 스타일 옵션
+ */
+export function buildTextOverlayString(
+  text: string,
+  options: {
+    position?: 'north_west' | 'north_east' | 'south_west' | 'south_east' | 'north' | 'south';
+    fontSize?: number;
+    fontColor?: string;
+    backgroundColor?: string;
+    padding?: number;
+    opacity?: number;
+  } = {}
+): string {
+  const {
+    position = 'north_west',
+    fontSize = 24,
+    fontColor = 'white',
+    backgroundColor = '333333',
+    padding = 10,
+    opacity = 80
+  } = options;
+  
+  // URL 인코딩된 텍스트 (Cloudinary 규격)
+  // 한글 및 특수문자 처리
+  const encodedText = encodeURIComponent(text)
+    .replace(/%20/g, '%20')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29');
+  
+  // Cloudinary 텍스트 오버레이 포맷:
+  // l_text:Arial_24_bold:텍스트,co_white,bo_4px_solid_333333/fl_layer_apply,g_north_west,x_10,y_10
+  const textOverlay = [
+    `l_text:NotoSansKR-Bold.otf_${fontSize}_bold:${encodedText}`,
+    `co_${fontColor}`,
+    `b_rgb:${backgroundColor}`,
+    `o_${opacity}`
+  ].join(',');
+  
+  // 위치 및 패딩 적용
+  const layerApply = `fl_layer_apply,g_${position},x_${padding},y_${padding}`;
+  
+  return `${textOverlay}/${layerApply}`;
+}
+
+/**
+ * 컨텍스트 기반 최종 URL 생성
+ * 변주 + 마스킹 + 텍스트 오버레이 통합
+ */
+export async function generateUniqueImageUrlWithContext(
+  cloudName: string,
+  publicId: string,
+  zones: MaskingZone[],
+  userId: string,
+  contextText?: string
+): Promise<CloudinaryUrlResult> {
+  const baseUrl = `https://res.cloudinary.com/${cloudName}/image/upload`;
+  
+  // 1. 변주 시드 생성
+  const variantSeed = await generateVariantSeed(userId);
+  
+  // 2. 변주 파라미터 생성
+  const variationParams = generateVariationParams();
+  const variationString = buildVariationTransformString(variationParams);
+  
+  // 3. 마스킹 스타일 선택 및 파라미터 생성
+  const maskingStyle = selectMaskingStyle();
+  const maskingParams: CloudinaryMaskingParams = {
+    type: maskingStyle.type,
+    intensity: maskingStyle.intensity,
+    zones: zones
+  };
+  const maskingString = buildMaskingTransformString(maskingParams);
+  
+  // 4. 텍스트 오버레이 생성 (옵션)
+  let textOverlayString = '';
+  if (contextText) {
+    textOverlayString = buildTextOverlayString(contextText, {
+      position: 'north_west',
+      fontSize: 20,
+      fontColor: 'white',
+      backgroundColor: '1a1a2e',
+      padding: 15,
+      opacity: 90
+    });
+  }
+  
+  // 5. 전체 변형 문자열 조합
+  const transformParts = [variationString, maskingString, textOverlayString].filter(Boolean);
+  const transformString = transformParts.join('/');
+  
+  // 6. 최종 URL 생성
+  const finalUrl = `${baseUrl}/${transformString}/${publicId}`;
+  
+  return {
+    url: finalUrl,
+    public_id: publicId,
+    transform_string: transformString,
+    variant_seed: variantSeed
+  };
+}
+
+/**
  * Cloudinary에 이미지 업로드 (Signed Upload 사용)
  */
 export async function uploadToCloudinary(

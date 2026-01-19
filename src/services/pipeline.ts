@@ -19,7 +19,8 @@ import type {
 } from '../types';
 import { generateRequestId, hashArrayBuffer, generateVariantSeed } from '../utils/hash';
 import { 
-  generateUniqueImageUrl, 
+  generateUniqueImageUrl,
+  generateUniqueImageUrlWithContext,
   uploadToCloudinary,
   generateVariationParams 
 } from './cloudinary';
@@ -56,60 +57,55 @@ import {
   getR2Sample,
   getCompanyNameKo,
   hasSampleForCompany,
+  extractCategoryFromKeyword,
+  generateContextOverlayText,
   type InsuranceSample
 } from './r2-fallback';
 
 /**
- * 키워드에서 상품 유형 추출
- */
-function extractProductType(keyword: string): string | undefined {
-  const productPatterns: Record<string, string[]> = {
-    '종신': ['종신', '종신보험', 'universal', 'whole'],
-    '암': ['암', '암보험', 'cancer'],
-    '어린이': ['어린이', '자녀', '아이', '태아', 'child', 'kids'],
-    '운전자': ['운전자', '운전', 'driver'],
-    '연금': ['연금', 'pension', 'annuity'],
-    '건강': ['건강', 'health'],
-    '상해': ['상해', 'injury'],
-    '화재': ['화재', 'fire'],
-    '실손': ['실손', '실비', 'real'],
-    '치아': ['치아', 'dental']
-  };
-  
-  const keywordLower = keyword.toLowerCase();
-  
-  for (const [productType, patterns] of Object.entries(productPatterns)) {
-    for (const pattern of patterns) {
-      if (keywordLower.includes(pattern.toLowerCase())) {
-        return productType;
-      }
-    }
-  }
-  
-  return undefined;
-}
-
-/**
- * R2 샘플 폴백 헬퍼 함수
- * 이미지 수집 실패 시 R2에서 표준 샘플을 가져옴
+ * R2 샘플 폴백 헬퍼 함수 (시각적 맥락 동기화 적용)
+ * 이미지 수집 실패 시 R2에서 카테고리에 맞는 표준 샘플을 가져옴
+ * 
+ * Fallback 우선순위:
+ * 1순위: {company}_{category}.png (질문과 상품까지 일치)
+ * 2순위: {company}_universal.png (보험사만 일치)
  */
 async function tryR2Fallback(
   env: Env,
   targetCompany: string,
   keyword: string,
   requestId: string
-): Promise<{ data: ArrayBuffer; sample: InsuranceSample } | null> {
+): Promise<{ 
+  data: ArrayBuffer; 
+  sample: InsuranceSample; 
+  matchType: 'exact' | 'fallback';
+  contextText: string;
+} | null> {
   if (!hasSampleForCompany(targetCompany)) {
     console.log(`[${requestId}] - R2 샘플 미등록: ${targetCompany}`);
     return null;
   }
   
-  const productKeyword = extractProductType(keyword);
-  const r2Sample = await getR2Sample(env, targetCompany, productKeyword);
+  // 시각적 맥락 동기화: 키워드에서 카테고리 추출
+  const targetCategories = extractCategoryFromKeyword(keyword);
+  console.log(`[${requestId}] - 타겟 카테고리: ${targetCategories.join(' → ')}`);
+  
+  // 새로운 getR2Sample 호출 (카테고리 우선순위 폴백 포함)
+  const r2Sample = await getR2Sample(env, targetCompany, keyword);
   
   if (r2Sample) {
+    // 컨텍스트 오버레이 텍스트 생성
+    const contextText = generateContextOverlayText(keyword, targetCompany);
+    
     console.log(`[${requestId}] - ✅ R2 샘플 폴백 성공: ${r2Sample.sample.sample_key}`);
-    return r2Sample;
+    console.log(`[${requestId}] - 매칭 타입: ${r2Sample.matchType}, 컨텍스트: "${contextText}"`);
+    
+    return {
+      data: r2Sample.data,
+      sample: r2Sample.sample,
+      matchType: r2Sample.matchType,
+      contextText
+    };
   }
   
   console.log(`[${requestId}] - R2 샘플 로드 실패: ${targetCompany}`);
@@ -127,7 +123,11 @@ export async function executePipeline(
   const requestId = generateRequestId();
   
   // 파이프라인 컨텍스트 초기화
-  const context: PipelineContext = {
+  const context: PipelineContext & { 
+    useR2Fallback?: boolean; 
+    r2MatchType?: 'exact' | 'fallback';
+    contextOverlayText?: string;
+  } = {
     request_id: requestId,
     user_id: request.request_info.user_id,
     current_step: 'request',
@@ -226,6 +226,9 @@ export async function executePipeline(
           if (r2Fallback) {
             imageData = r2Fallback.data;
             sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+            context.useR2Fallback = true;
+            context.r2MatchType = r2Fallback.matchType;
+            context.contextOverlayText = r2Fallback.contextText;
           } else {
             await updateImageLog(env.DB, requestId, { status: 'failed', error_message: 'R2 샘플도 없음' });
             return createErrorResponse(requestId, 'SCRAPING_FAILED', '이미지 수집 실패. R2 샘플 업로드가 필요합니다.');
@@ -239,6 +242,9 @@ export async function executePipeline(
             if (r2Fallback) {
               imageData = r2Fallback.data;
               sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+              context.useR2Fallback = true;
+              context.r2MatchType = r2Fallback.matchType;
+              context.contextOverlayText = r2Fallback.contextText;
             } else {
               // R2도 없으면 그냥 진행 (경고만)
               console.log(`[${requestId}] - ⚠️ R2 없음, 원본 스크린샷으로 계속`);
@@ -280,6 +286,9 @@ export async function executePipeline(
             if (r2Fallback) {
               imageData = r2Fallback.data;
               sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+              context.useR2Fallback = true;
+              context.r2MatchType = r2Fallback.matchType;
+              context.contextOverlayText = r2Fallback.contextText;
             } else {
               // R2도 없으면 스크린샷 시도
               console.log(`[${requestId}] - R2 없음, 스크린샷으로 폴백...`);
@@ -324,6 +333,9 @@ export async function executePipeline(
             if (r2Fallback) {
               imageData = r2Fallback.data;
               sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+              context.useR2Fallback = true;
+              context.r2MatchType = r2Fallback.matchType;
+              context.contextOverlayText = r2Fallback.contextText;
             } else {
               await updateImageLog(env.DB, requestId, { status: 'failed', error_message: 'R2 샘플 필요' });
               return createErrorResponse(requestId, 'SCRAPING_FAILED', `블로그 스크린샷 실패. ${request.request_info.target_company} R2 샘플 업로드가 필요합니다.`);
@@ -337,6 +349,9 @@ export async function executePipeline(
               if (r2Fallback) {
                 imageData = r2Fallback.data;
                 sourceUrl = `r2://samples/${r2Fallback.sample.sample_key}`;
+                context.useR2Fallback = true;
+                context.r2MatchType = r2Fallback.matchType;
+                context.contextOverlayText = r2Fallback.contextText;
               } else {
                 console.log(`[${requestId}] - ⚠️ R2 없음, 원본 스크린샷으로 계속`);
                 imageData = screenshotResult.image_data;
@@ -388,35 +403,32 @@ export async function executePipeline(
       // 검증 실패 시 R2 폴백 시도 (에러 대신 자동 교체)
       if (!verificationResult.is_valid) {
         console.log(`[${requestId}] - ❌ 검증 실패: ${verificationResult.reason}`);
-        console.log(`[${requestId}] - 폴백 모드: R2 표준 샘플로 자동 교체 시도...`);
+        console.log(`[${requestId}] - 폴백 모드: R2 표준 샘플로 자동 교체 시도... (시각적 맥락 동기화)`);
         
-        // R2에서 해당 보험사 샘플 가져오기
-        if (hasSampleForCompany(request.request_info.target_company)) {
-          // 키워드에서 상품 유형 추출 시도
-          const productKeyword = extractProductType(request.request_info.keyword);
-          
-          r2Sample = await getR2Sample(
-            env,
-            request.request_info.target_company,
-            productKeyword
-          );
-          
-          if (r2Sample) {
-            console.log(`[${requestId}] - ✅ R2 샘플 폴백 성공: ${r2Sample.sample.sample_key}`);
-            imageData = r2Sample.data;
-            sourceUrl = `r2://samples/${r2Sample.sample.sample_key}`;
-            useR2Fallback = true;
-          } else {
-            // R2 샘플이 없으면 경고만 남기고 원본 이미지로 계속 진행 (에러 X)
-            console.log(`[${requestId}] - ⚠️ R2 샘플 미등록, 원본 이미지로 계속 진행 (AI 검증만 실패)`);
-            console.log(`[${requestId}] - 샘플 업로드 필요: samples/life|nonlife/${request.request_info.target_company.toLowerCase()}/*.png`);
-            // 광고 이미지라도 일단 가공 진행 (R2 업로드 전까지 임시 조치)
-            useR2Fallback = false;
-          }
+        // 시각적 맥락 동기화 전략으로 R2 샘플 폴백 시도
+        const r2FallbackResult = await tryR2Fallback(
+          env,
+          request.request_info.target_company,
+          request.request_info.keyword,
+          requestId
+        );
+        
+        if (r2FallbackResult) {
+          console.log(`[${requestId}] - ✅ R2 샘플 폴백 성공: ${r2FallbackResult.sample.sample_key}`);
+          console.log(`[${requestId}] - 매칭 타입: ${r2FallbackResult.matchType}, 컨텍스트: "${r2FallbackResult.contextText}"`);
+          imageData = r2FallbackResult.data;
+          r2Sample = { data: r2FallbackResult.data, sample: r2FallbackResult.sample };
+          sourceUrl = `r2://samples/${r2FallbackResult.sample.sample_key}`;
+          useR2Fallback = true;
+          // 컨텍스트 오버레이 텍스트 저장
+          context.useR2Fallback = true;
+          context.r2MatchType = r2FallbackResult.matchType;
+          context.contextOverlayText = r2FallbackResult.contextText;
         } else {
-          // 해당 보험사 샘플 미등록 시도 경고만 남기고 계속 진행
-          console.log(`[${requestId}] - ⚠️ ${request.request_info.target_company} 샘플 미등록, 원본 이미지로 계속 진행`);
-          console.log(`[${requestId}] - 샘플 등록 필요: INSURANCE_SAMPLES['${request.request_info.target_company}']`);
+          // R2 샘플이 없으면 경고만 남기고 원본 이미지로 계속 진행 (에러 X)
+          console.log(`[${requestId}] - ⚠️ R2 샘플 미등록, 원본 이미지로 계속 진행 (AI 검증만 실패)`);
+          console.log(`[${requestId}] - 샘플 업로드 필요: samples/life|nonlife/${request.request_info.target_company.toLowerCase()}/*.png`);
+          // 광고 이미지라도 일단 가공 진행 (R2 업로드 전까지 임시 조치)
           useR2Fallback = false;
         }
       }
@@ -592,12 +604,26 @@ export async function executePipeline(
     context.current_step = 'masking';
     console.log(`[${requestId}] Step 7: Cloudinary URL 변환으로 마스킹 적용 중...`);
     
-    const urlResult = await generateUniqueImageUrl(
-      env.CLOUDINARY_CLOUD_NAME,
-      context.cloudinary_public_id!,
-      maskingZones,
-      context.user_id
-    );
+    // 컨텍스트 오버레이 적용 여부 결정
+    // R2 폴백 사용 시에만 텍스트 오버레이 적용 (시각적 맥락 동기화)
+    let urlResult;
+    if (context.useR2Fallback && context.contextOverlayText) {
+      console.log(`[${requestId}] - 컨텍스트 오버레이 적용: "${context.contextOverlayText}"`);
+      urlResult = await generateUniqueImageUrlWithContext(
+        env.CLOUDINARY_CLOUD_NAME,
+        context.cloudinary_public_id!,
+        maskingZones,
+        context.user_id,
+        context.contextOverlayText
+      );
+    } else {
+      urlResult = await generateUniqueImageUrl(
+        env.CLOUDINARY_CLOUD_NAME,
+        context.cloudinary_public_id!,
+        maskingZones,
+        context.user_id
+      );
+    }
     
     context.final_url = urlResult.url;
     
