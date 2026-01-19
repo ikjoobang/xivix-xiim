@@ -135,8 +135,8 @@ export async function searchNaverBlogs(
 }
 
 /**
- * 통합 검색: 이미지 + 블로그 결과 조합
- * 보험 설계안 타겟팅에 최적화
+ * 통합 검색: 블로그 우선 + 이미지 결과 조합
+ * 보험 설계안 타겟팅에 최적화 (실제 설계서 이미지 우선)
  */
 export async function searchInsuranceContent(
   clientId: string,
@@ -144,9 +144,6 @@ export async function searchInsuranceContent(
   keyword: string,
   targetCompany?: string
 ): Promise<{ success: boolean; targets?: SearchTarget[]; error?: string }> {
-  // 키워드 최적화
-  let optimizedKeyword = keyword;
-  
   // 보험사 한글명 매핑
   const companyNameMap: Record<string, string> = {
     'SAMSUNG_LIFE': '삼성생명',
@@ -160,47 +157,88 @@ export async function searchInsuranceContent(
     'HYUNDAI_MARINE': '현대해상',
     'DB_INSURANCE': 'DB손해보험',
     'KB_INSURANCE': 'KB손해보험',
-    'MERITZ_FIRE': '메리츠화재'
+    'MERITZ_FIRE': '메리츠화재',
+    'AIA': 'AIA생명',
+    'METLIFE': '메트라이프',
+    'PRUDENTIAL': '푸르덴셜',
+    'LINA': '라이나생명',
+    'CHUBB_LIFE': '처브생명'
   };
   
-  // 보험사명 추가
-  if (targetCompany && companyNameMap[targetCompany]) {
-    if (!keyword.includes(companyNameMap[targetCompany])) {
-      optimizedKeyword = `${companyNameMap[targetCompany]} ${keyword}`;
-    }
+  // 회사명 추출
+  const companyName = targetCompany && companyNameMap[targetCompany] 
+    ? companyNameMap[targetCompany] 
+    : '';
+  
+  // 설계안 특화 검색 키워드 생성 (광고 이미지 제외)
+  const designKeywords = [
+    '가입설계서',
+    '보장내역',
+    '보험증권',
+    '보장분석표',
+    '설계안 캡처'
+  ];
+  
+  // 랜덤하게 설계안 키워드 선택
+  const randomDesignKeyword = designKeywords[Math.floor(Math.random() * designKeywords.length)];
+  
+  // 키워드 최적화 - 더 구체적으로
+  let optimizedKeyword = keyword;
+  
+  // 기존 키워드에 보험사명이 없으면 추가
+  if (companyName && !keyword.includes(companyName)) {
+    optimizedKeyword = `${companyName} ${keyword}`;
   }
   
-  // 설계안/보장분석 키워드 추가
-  if (!keyword.includes('설계안') && !keyword.includes('보장분석')) {
-    optimizedKeyword += ' 설계안';
+  // 일반적인 "설계안" 대신 구체적인 키워드로 대체
+  if (keyword.includes('설계안') || keyword.includes('샘플')) {
+    optimizedKeyword = optimizedKeyword
+      .replace(/설계안\s*샘플/g, randomDesignKeyword)
+      .replace(/설계안/g, randomDesignKeyword);
+  } else if (!keyword.includes('가입설계') && !keyword.includes('보장내역') && !keyword.includes('보험증권')) {
+    optimizedKeyword += ` ${randomDesignKeyword}`;
   }
   
   console.log(`[네이버 검색] 최적화된 키워드: "${optimizedKeyword}"`);
   
-  // 이미지 검색 실행
-  const imageResult = await searchNaverImages(clientId, clientSecret, optimizedKeyword, 10);
-  
-  // 블로그 검색도 병행 (이미지가 없을 경우 대비)
-  const blogResult = await searchNaverBlogs(clientId, clientSecret, optimizedKeyword, 5);
-  
   const allTargets: SearchTarget[] = [];
   
-  // 이미지 결과 추가 (우선순위 높음)
-  if (imageResult.success && imageResult.items) {
-    allTargets.push(...imageResult.items);
+  // 1. 블로그 검색 먼저 (실제 설계안 캡처가 많음)
+  const blogResult = await searchNaverBlogs(clientId, clientSecret, optimizedKeyword, 10);
+  if (blogResult.success && blogResult.items) {
+    // 블로그 결과 중 설계안 관련 키워드가 포함된 것 우선
+    const designRelated = blogResult.items.filter(item => 
+      item.title.includes('설계') || 
+      item.title.includes('보장') || 
+      item.title.includes('보험료') ||
+      item.title.includes('가입') ||
+      item.title.includes('증권')
+    );
+    const others = blogResult.items.filter(item => !designRelated.includes(item));
+    allTargets.push(...designRelated, ...others);
   }
   
-  // 블로그 결과 추가
-  if (blogResult.success && blogResult.items) {
-    allTargets.push(...blogResult.items);
+  // 2. 이미지 검색 (블로그에서 못 찾을 경우 대비)
+  const imageResult = await searchNaverImages(clientId, clientSecret, optimizedKeyword, 10);
+  if (imageResult.success && imageResult.items) {
+    // 광고성 이미지 필터링 (뉴스, 홍보 이미지 제외)
+    const filteredImages = imageResult.items.filter(item => {
+      const title = item.title.toLowerCase();
+      // 광고/뉴스 제외 키워드
+      const excludeKeywords = ['광고', '출시', '선봬', '론칭', '홍보', '보도', '기자'];
+      return !excludeKeywords.some(kw => title.includes(kw));
+    });
+    allTargets.push(...filteredImages);
   }
   
   if (allTargets.length === 0) {
     return {
       success: false,
-      error: imageResult.error || blogResult.error || '검색 결과가 없습니다'
+      error: blogResult.error || imageResult.error || '검색 결과가 없습니다'
     };
   }
+  
+  console.log(`[네이버 검색] 총 ${allTargets.length}개 타겟 (블로그: ${blogResult.items?.length || 0}, 이미지: ${imageResult.items?.length || 0})`);
   
   return { success: true, targets: allTargets };
 }
