@@ -272,8 +272,9 @@ export async function executePipeline(
       console.log(`[${requestId}] - 설계서 여부: ${verificationResult.is_design_document ? 'Yes' : 'No'}`);
       console.log(`[${requestId}] - 판단 근거: ${verificationResult.reason}`);
       
-      // 검증 실패 시 R2 폴백 시도
+      // 검증 실패 시 R2 폴백 시도 또는 에러 반환
       if (!verificationResult.is_valid) {
+        console.log(`[${requestId}] - ❌ 검증 실패: ${verificationResult.reason}`);
         console.log(`[${requestId}] - 검증 실패, R2 표준 샘플로 폴백 시도...`);
         
         // R2에서 해당 보험사 샘플 가져오기
@@ -293,10 +294,30 @@ export async function executePipeline(
             sourceUrl = `r2://samples/${r2Sample.sample.sample_key}`;
             useR2Fallback = true;
           } else {
-            console.log(`[${requestId}] - R2 샘플 없음, 원본 이미지로 계속 진행`);
+            // R2 샘플도 없으면 에러 반환 (잘못된 이미지 사용 방지)
+            console.log(`[${requestId}] - ❌ R2 샘플 없음, 검증 실패로 처리 중단`);
+            await updateImageLog(env.DB, requestId, { 
+              status: 'failed', 
+              error_message: `검증 실패: ${verificationResult.reason}. 설계안 이미지가 아닙니다.`
+            });
+            return createErrorResponse(
+              requestId, 
+              'VERIFICATION_FAILED', 
+              `이미지 검증 실패: ${verificationResult.reason}. 보험 설계안 이미지가 아닙니다. source_url로 직접 설계안 이미지를 제공해주세요.`
+            );
           }
         } else {
-          console.log(`[${requestId}] - ${request.request_info.target_company}에 대한 R2 샘플 미등록, 원본 이미지로 계속 진행`);
+          // 해당 보험사 샘플 미등록 시 에러 반환
+          console.log(`[${requestId}] - ❌ ${request.request_info.target_company} 샘플 미등록, 검증 실패로 처리 중단`);
+          await updateImageLog(env.DB, requestId, { 
+            status: 'failed', 
+            error_message: `검증 실패: ${verificationResult.reason}. R2 샘플도 없음.`
+          });
+          return createErrorResponse(
+            requestId, 
+            'VERIFICATION_FAILED', 
+            `이미지 검증 실패: ${verificationResult.reason}. source_url로 직접 설계안 이미지를 제공해주세요.`
+          );
         }
       }
       
