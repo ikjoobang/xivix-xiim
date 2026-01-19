@@ -144,11 +144,12 @@ webapp/
 │   ├── routes/api.ts          # API 라우트 핸들러
 │   ├── services/
 │   │   ├── pipeline.ts        # 10단계 파이프라인 핵심 로직
-│   │   ├── cloudinary.ts      # URL 기반 이미지 변환
+│   │   ├── cloudinary.ts      # URL 기반 이미지 변환 + 텍스트 오버레이
 │   │   ├── gemini.ts          # AI Vision 좌표 추출
 │   │   ├── naver.ts           # 네이버 검색 API
 │   │   ├── browserless.ts     # 웹 스크래핑
-│   │   └── database.ts        # D1 CRUD 작업
+│   │   ├── database.ts        # D1 CRUD 작업
+│   │   └── r2-fallback.ts     # 시각적 맥락 동기화 R2 샘플 폴백
 │   └── utils/hash.ts          # 해시/시드 생성
 ├── migrations/                 # D1 스키마
 ├── public/static/             # 정적 파일
@@ -157,11 +158,66 @@ webapp/
 └── .dev.vars                  # 로컬 환경변수 (Git 제외)
 ```
 
+## 시각적 맥락 동기화 (Visual Relevance) 전략
+
+### 핵심 기능
+질문의 상품군(암, 종신, 운전자 등)에 최적화된 샘플을 자동 선택하는 지능형 폴백 시스템
+
+### R2 샘플 경로 구조
+```
+samples/
+├── life/                      # 생명보험 (19개사)
+│   ├── samsung/
+│   │   ├── universal.png      # 기본 종합
+│   │   ├── cancer.png         # 암보험
+│   │   ├── whole_life.png     # 종신보험
+│   │   ├── pension.png        # 연금보험
+│   │   └── child.png          # 어린이보험
+│   ├── hanwha/
+│   ├── kyobo/
+│   └── ...
+└── nonlife/                   # 손해보험 (12개사)
+    ├── samsung/
+    │   ├── universal.png      # 기본 종합
+    │   ├── driver.png         # 운전자보험
+    │   ├── child.png          # 어린이보험
+    │   ├── health.png         # 건강보험
+    │   └── accident.png       # 상해보험
+    ├── hyundai/
+    ├── db/
+    └── ...
+```
+
+### 카테고리 매핑
+| 키워드 | 카테고리 코드 | 우선순위 |
+|--------|---------------|----------|
+| 암, 뇌, 심장, 3대질병 | cancer | 1 |
+| 종신, 사망, 상속 | whole_life | 1 |
+| 어린이, 자녀, 태아 | child | 1 |
+| 운전자, 12대중과실 | driver | 1 |
+| 연금, 저축, 노후 | pension | 1 |
+| 건강, 실손 | health | 1 |
+| 상해 | accident | 1 |
+| 화재 | fire | 1 |
+| 치아 | dental | 1 |
+
+### Fallback 우선순위
+1. **1순위**: `{company}_{category}.png` (질문과 상품까지 일치)
+2. **2순위**: `{company}_universal.png` (보험사만 일치)
+
+### 동적 텍스트 오버레이 (Context Overlay)
+R2 폴백 사용 시, 이미지에 컨텍스트 텍스트를 자동 합성:
+- 예: "삼성생명 종신보험 맞춤 설계안"
+- 위치: 좌측 상단
+- 스타일: 반투명 배경 + 흰색 텍스트
+
 ## 배포 상태
 
 - **Platform**: Cloudflare Pages
 - **Status**: ✅ Active
 - **Last Updated**: 2026-01-19
+- **Version**: v1.1.0 (Visual Relevance)
+- **Commit**: 9a1eaa7
 - **Secrets Configured**: 7개 (GEMINI_API_KEY, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, BROWSERLESS_API_KEY, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET, XIVIX_API_KEY)
 
 ## 로컬 개발
