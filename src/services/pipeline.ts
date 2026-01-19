@@ -266,10 +266,11 @@ export async function executePipeline(
       console.log(`[${requestId}] - R2 저장 스킵 (로컬 개발 환경)`);
     }
     
-    // Cloudinary에 업로드
+    // Cloudinary에 업로드 (Signed Upload)
     const uploadResult = await uploadToCloudinary(
       env.CLOUDINARY_CLOUD_NAME,
-      env.CLOUDINARY_UPLOAD_PRESET,
+      env.CLOUDINARY_API_KEY,
+      env.CLOUDINARY_API_SECRET,
       imageData,
       `${requestId}.png`,
       'xivix/raw'

@@ -223,16 +223,27 @@ export async function generateSignedUploadUrl(
 }
 
 /**
- * Cloudinary에 이미지 업로드 (Unsigned Preset 사용)
+ * Cloudinary에 이미지 업로드 (Signed Upload 사용)
  */
 export async function uploadToCloudinary(
   cloudName: string,
-  uploadPreset: string,
+  apiKey: string,
+  apiSecret: string,
   imageData: ArrayBuffer | Blob,
   fileName: string,
   folder: string = 'xivix/raw'
 ): Promise<{ success: boolean; public_id?: string; url?: string; error?: string }> {
   try {
+    const timestamp = Math.floor(Date.now() / 1000);
+    
+    // Cloudinary 서명 생성 (SHA-1)
+    const paramsToSign = `folder=${folder}&timestamp=${timestamp}${apiSecret}`;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(paramsToSign);
+    const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const signature = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    
     const formData = new FormData();
     
     // ArrayBuffer를 Blob으로 변환
@@ -241,7 +252,9 @@ export async function uploadToCloudinary(
       : new Blob([imageData], { type: 'image/png' });
     
     formData.append('file', blob, fileName);
-    formData.append('upload_preset', uploadPreset);
+    formData.append('api_key', apiKey);
+    formData.append('timestamp', timestamp.toString());
+    formData.append('signature', signature);
     formData.append('folder', folder);
     
     const response = await fetch(
