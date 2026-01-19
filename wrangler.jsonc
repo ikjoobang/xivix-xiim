@@ -9,8 +9,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "XIIM_DB",
-      "database_id": "placeholder-will-be-replaced-after-creation"
+      "database_name": "xivix-production",
+      "database_id": "cc1216aa-39ea-47d7-9489-4c2eceb678a2"
     }
   ],
   

@@ -21,7 +21,7 @@ export async function authenticateUser(
     const hashedKey = await hashApiKey(apiKey);
     
     const result = await db.prepare(
-      'SELECT * FROM users WHERE api_key_hash = ?'
+      'SELECT * FROM xiim_users WHERE api_key_hash = ?'
     ).bind(hashedKey).first<User>();
     
     if (!result) {
@@ -46,7 +46,7 @@ export async function getUserById(
 ): Promise<User | null> {
   try {
     const result = await db.prepare(
-      'SELECT * FROM users WHERE user_id = ?'
+      'SELECT * FROM xiim_users WHERE user_id = ?'
     ).bind(userId).first<User>();
     
     return result || null;
@@ -72,7 +72,7 @@ export async function checkDailyUsage(
     
     // 오늘 사용량 조회
     const usage = await db.prepare(
-      'SELECT request_count FROM daily_usage WHERE user_id = ? AND date = ?'
+      'SELECT request_count FROM xiim_daily_usage WHERE user_id = ? AND date = ?'
     ).bind(userId, today).first<{ request_count: number }>();
     
     const used = usage?.request_count || 0;
@@ -101,7 +101,7 @@ export async function incrementDailyUsage(
     
     // UPSERT로 사용량 업데이트
     await db.prepare(`
-      INSERT INTO daily_usage (user_id, date, request_count, success_count, failed_count)
+      INSERT INTO xiim_daily_usage (user_id, date, request_count, success_count, failed_count)
       VALUES (?, ?, 1, ?, ?)
       ON CONFLICT(user_id, date) DO UPDATE SET
         request_count = request_count + 1,
@@ -134,7 +134,7 @@ export async function createImageLog(
 ): Promise<{ success: boolean; id?: number; error?: string }> {
   try {
     const result = await db.prepare(`
-      INSERT INTO image_logs (
+      INSERT INTO xiim_image_logs (
         request_id, user_id, source_hash, variant_seed, keyword, 
         target_company, insurance_type, status
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -197,7 +197,7 @@ export async function updateImageLog(
     values.push(requestId);
     
     await db.prepare(`
-      UPDATE image_logs SET ${fields.join(', ')} WHERE request_id = ?
+      UPDATE xiim_image_logs SET ${fields.join(', ')} WHERE request_id = ?
     `).bind(...values).run();
     
     return { success: true };
@@ -218,7 +218,7 @@ export async function getImageLogByRequestId(
 ): Promise<ImageLog | null> {
   try {
     const result = await db.prepare(
-      'SELECT * FROM image_logs WHERE request_id = ?'
+      'SELECT * FROM xiim_image_logs WHERE request_id = ?'
     ).bind(requestId).first<ImageLog>();
     
     return result || null;
@@ -244,7 +244,7 @@ export async function checkHashDuplicate(
     const combinedHash = await generateCombinedHash(sourceHash, variantSeed);
     
     const result = await db.prepare(
-      'SELECT request_id FROM hash_registry WHERE combined_hash = ?'
+      'SELECT request_id FROM xiim_hash_registry WHERE combined_hash = ?'
     ).bind(combinedHash).first<{ request_id: string }>();
     
     if (result) {
@@ -271,7 +271,7 @@ export async function registerHash(
     const combinedHash = await generateCombinedHash(sourceHash, variantSeed);
     
     await db.prepare(
-      'INSERT INTO hash_registry (combined_hash, request_id) VALUES (?, ?)'
+      'INSERT INTO xiim_hash_registry (combined_hash, request_id) VALUES (?, ?)'
     ).bind(combinedHash, requestId).run();
     
     return { success: true };
@@ -296,7 +296,7 @@ export async function getInsuranceCompanyByCode(
 ): Promise<InsuranceCompany | null> {
   try {
     const result = await db.prepare(
-      'SELECT * FROM insurance_companies WHERE code = ? AND is_active = 1'
+      'SELECT * FROM xiim_insurance_companies WHERE code = ? AND is_active = 1'
     ).bind(code).first<InsuranceCompany>();
     
     return result || null;
@@ -315,7 +315,7 @@ export async function getInsuranceCompaniesByCategory(
 ): Promise<InsuranceCompany[]> {
   try {
     const result = await db.prepare(
-      'SELECT * FROM insurance_companies WHERE category = ? AND is_active = 1 ORDER BY name_ko'
+      'SELECT * FROM xiim_insurance_companies WHERE category = ? AND is_active = 1 ORDER BY name_ko'
     ).bind(category).all<InsuranceCompany>();
     
     return result.results || [];
@@ -333,7 +333,7 @@ export async function getAllInsuranceCompanies(
 ): Promise<InsuranceCompany[]> {
   try {
     const result = await db.prepare(
-      'SELECT * FROM insurance_companies WHERE is_active = 1 ORDER BY category, name_ko'
+      'SELECT * FROM xiim_insurance_companies WHERE is_active = 1 ORDER BY category, name_ko'
     ).all<InsuranceCompany>();
     
     return result.results || [];
