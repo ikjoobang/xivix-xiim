@@ -201,7 +201,63 @@ export async function extractImageUrls(
 }
 
 /**
- * 특정 URL의 이미지 직접 다운로드
+ * 이미지 유효성 검증
+ * - 최소 크기 체크 (10KB 이상)
+ * - 이미지 시그니처(매직 바이트) 체크
+ * - Content-Type 체크
+ */
+export function validateImageData(
+  data: ArrayBuffer, 
+  contentType?: string
+): { valid: boolean; error?: string } {
+  // 1. 최소 크기 체크 (10KB 미만은 대부분 깨진 파일이나 placeholder)
+  const MIN_IMAGE_SIZE = 10 * 1024; // 10KB
+  if (data.byteLength < MIN_IMAGE_SIZE) {
+    return { 
+      valid: false, 
+      error: `이미지 크기 부족: ${data.byteLength} bytes (최소 ${MIN_IMAGE_SIZE} bytes 필요)` 
+    };
+  }
+  
+  // 2. 이미지 매직 바이트 체크
+  const bytes = new Uint8Array(data.slice(0, 12));
+  
+  // JPEG: FF D8 FF
+  const isJPEG = bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF;
+  
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  const isPNG = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47;
+  
+  // GIF: 47 49 46 38
+  const isGIF = bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38;
+  
+  // WebP: 52 49 46 46 ... 57 45 42 50
+  const isWebP = bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+                 bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50;
+  
+  if (!isJPEG && !isPNG && !isGIF && !isWebP) {
+    return { 
+      valid: false, 
+      error: `유효하지 않은 이미지 형식 (매직 바이트: ${Array.from(bytes.slice(0, 4)).map(b => b.toString(16)).join(' ')})` 
+    };
+  }
+  
+  // 3. Content-Type 체크 (있을 경우)
+  if (contentType) {
+    const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!validTypes.some(t => contentType.includes(t))) {
+      return { 
+        valid: false, 
+        error: `유효하지 않은 Content-Type: ${contentType}` 
+      };
+    }
+  }
+  
+  return { valid: true };
+}
+
+/**
+ * 특정 URL의 이미지 직접 다운로드 (검증 포함)
  */
 export async function downloadImage(
   imageUrl: string
@@ -220,13 +276,22 @@ export async function downloadImage(
       };
     }
     
-    const contentType = response.headers.get('content-type') || 'image/png';
+    const contentType = response.headers.get('content-type') || '';
     const data = await response.arrayBuffer();
+    
+    // ✅ 이미지 유효성 검증 추가
+    const validation = validateImageData(data, contentType);
+    if (!validation.valid) {
+      return {
+        success: false,
+        error: `Invalid image file: ${validation.error}`
+      };
+    }
     
     return {
       success: true,
       data,
-      contentType
+      contentType: contentType || 'image/png'
     };
   } catch (error) {
     return {

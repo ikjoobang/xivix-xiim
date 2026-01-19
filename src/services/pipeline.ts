@@ -32,7 +32,8 @@ import {
 } from './gemini';
 import { 
   captureScreenshot, 
-  downloadImage
+  downloadImage,
+  validateImageData
 } from './browserless';
 import { 
   searchInsuranceContent,
@@ -169,6 +170,17 @@ export async function executePipeline(
           return createErrorResponse(requestId, 'SCRAPING_FAILED', '이미지 수집 실패');
         }
         
+        // ✅ 스크린샷 이미지 유효성 검증
+        const screenshotValidation = validateImageData(screenshotResult.image_data);
+        if (!screenshotValidation.valid) {
+          console.log(`[${requestId}] - 스크린샷 검증 실패: ${screenshotValidation.error}`);
+          await updateImageLog(env.DB, requestId, { 
+            status: 'failed', 
+            error_message: `Invalid image file: ${screenshotValidation.error}` 
+          });
+          return createErrorResponse(requestId, 'INVALID_IMAGE', `스크린샷 이미지 검증 실패: ${screenshotValidation.error}`);
+        }
+        
         imageData = screenshotResult.image_data;
         sourceUrl = searchUrl;
       } else {
@@ -208,6 +220,17 @@ export async function executePipeline(
               });
               return createErrorResponse(requestId, 'SCRAPING_FAILED', '이미지 수집 실패');
             }
+            
+            // ✅ 폴백 스크린샷 이미지 유효성 검증
+            const fallbackValidation = validateImageData(screenshotResult.image_data);
+            if (!fallbackValidation.valid) {
+              console.log(`[${requestId}] - 폴백 스크린샷 검증 실패: ${fallbackValidation.error}`);
+              await updateImageLog(env.DB, requestId, { 
+                status: 'failed', 
+                error_message: `Invalid image file: ${fallbackValidation.error}` 
+              });
+              return createErrorResponse(requestId, 'INVALID_IMAGE', `폴백 이미지 검증 실패: ${fallbackValidation.error}`);
+            }
             imageData = screenshotResult.image_data;
           } else {
             imageData = downloadResult.data;
@@ -229,6 +252,17 @@ export async function executePipeline(
               error_message: screenshotResult.error 
             });
             return createErrorResponse(requestId, 'SCRAPING_FAILED', '블로그 스크린샷 실패');
+          }
+          
+          // ✅ 블로그 스크린샷 이미지 유효성 검증
+          const blogScreenshotValidation = validateImageData(screenshotResult.image_data);
+          if (!blogScreenshotValidation.valid) {
+            console.log(`[${requestId}] - 블로그 스크린샷 검증 실패: ${blogScreenshotValidation.error}`);
+            await updateImageLog(env.DB, requestId, { 
+              status: 'failed', 
+              error_message: `Invalid image file: ${blogScreenshotValidation.error}` 
+            });
+            return createErrorResponse(requestId, 'INVALID_IMAGE', `블로그 스크린샷 검증 실패: ${blogScreenshotValidation.error}`);
           }
           
           imageData = screenshotResult.image_data;
