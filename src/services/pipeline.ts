@@ -401,11 +401,21 @@ export async function executePipeline(
     // Cloudinary 결과 처리
     const cloudinaryResult = uploadResult.status === 'fulfilled' ? uploadResult.value : null;
     if (!cloudinaryResult?.success || !cloudinaryResult?.public_id) {
-      console.log(`[${requestId}] - Cloudinary 업로드 실패, 데모 모드로 계속`);
-      context.cloudinary_public_id = `demo/${requestId}`;
-    } else {
-      context.cloudinary_public_id = cloudinaryResult.public_id;
+      // Cloudinary 업로드 실패 시 에러 반환 (demo/ 경로 404 방지)
+      const uploadError = cloudinaryResult?.error || 'Cloudinary 업로드 실패';
+      console.error(`[${requestId}] - ❌ Cloudinary 업로드 실패: ${uploadError}`);
+      await updateImageLog(env.DB, requestId, { 
+        status: 'failed', 
+        error_message: uploadError
+      });
+      return createErrorResponse(
+        requestId, 
+        'UPLOAD_FAILED', 
+        `이미지 업로드 실패: ${uploadError}. 잠시 후 다시 시도해주세요.`
+      );
     }
+    context.cloudinary_public_id = cloudinaryResult.public_id;
+    console.log(`[${requestId}] - ✅ Cloudinary 업로드 성공: ${cloudinaryResult.public_id}`);
     
     // DB 로그 업데이트 (비동기)
     updateImageLog(env.DB, requestId, {
