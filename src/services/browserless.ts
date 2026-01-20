@@ -8,6 +8,17 @@ import type { BrowserlessScreenshotRequest, BrowserlessScreenshotResponse } from
 /** Browserless API 엔드포인트 */
 const BROWSERLESS_API_URL = 'https://chrome.browserless.io';
 
+/** 
+ * Browserless API 타임아웃 설정 (밀리초)
+ * 
+ * V3.4 안정화: Browserless 세션 최적화
+ * - 페이지 로딩 타임아웃: 30초
+ * - 전체 요청 타임아웃: 45초 (여유 시간 포함)
+ * - 세션 자동 종료 보장
+ */
+const BROWSERLESS_PAGE_TIMEOUT = 30000;  // 페이지 로딩 타임아웃
+const BROWSERLESS_REQUEST_TIMEOUT = 45000;  // 전체 요청 타임아웃
+
 /**
  * 네이버 이미지 검색 URL 생성
  */
@@ -26,11 +37,19 @@ export function buildYoutubeSearchUrl(keyword: string): string {
 
 /**
  * Browserless를 사용하여 스크린샷 캡처
+ * 
+ * V3.4 안정화: 세션 종료 보장
+ * - AbortController를 사용한 타임아웃 설정
+ * - 브라우저 세션 자동 종료 (Browserless.io REST API는 stateless)
  */
 export async function captureScreenshot(
   apiKey: string,
   request: BrowserlessScreenshotRequest
 ): Promise<BrowserlessScreenshotResponse> {
+  // V3.4: AbortController를 사용한 전체 요청 타임아웃
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BROWSERLESS_REQUEST_TIMEOUT);
+  
   try {
     const options = request.options || {};
     
@@ -53,9 +72,10 @@ export async function captureScreenshot(
         },
         gotoOptions: {
           waitUntil: 'networkidle2',
-          timeout: 30000
+          timeout: BROWSERLESS_PAGE_TIMEOUT
         }
-      })
+      }),
+      signal: controller.signal  // V3.4: 타임아웃 시그널
     });
     
     if (!response.ok) {
@@ -73,21 +93,40 @@ export async function captureScreenshot(
       image_data: imageData
     };
   } catch (error) {
+    const errorName = error instanceof Error ? error.name : '';
+    
+    // V3.4: 타임아웃 시 명확한 에러 메시지
+    if (errorName === 'AbortError') {
+      console.warn(`[Browserless] 스크린샷 타임아웃 (${BROWSERLESS_REQUEST_TIMEOUT / 1000}초): ${request.url}`);
+      return {
+        success: false,
+        error: `Browserless 스크린샷 시간 초과 (${BROWSERLESS_REQUEST_TIMEOUT / 1000}초)`
+      };
+    }
+    
     return {
       success: false,
       error: `Browserless error: ${error instanceof Error ? error.message : 'Unknown error'}`
     };
+  } finally {
+    clearTimeout(timeoutId);  // V3.4: 타임아웃 클리어 (메모리 누수 방지)
   }
 }
 
 /**
  * Browserless를 사용하여 페이지 내 특정 요소 스크린샷
+ * 
+ * V3.4 안정화: 세션 종료 보장
  */
 export async function captureElementScreenshot(
   apiKey: string,
   url: string,
   selector: string
 ): Promise<BrowserlessScreenshotResponse> {
+  // V3.4: AbortController를 사용한 전체 요청 타임아웃
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BROWSERLESS_REQUEST_TIMEOUT);
+  
   try {
     const response = await fetch(`${BROWSERLESS_API_URL}/screenshot?token=${apiKey}`, {
       method: 'POST',
@@ -103,9 +142,10 @@ export async function captureElementScreenshot(
         selector,
         gotoOptions: {
           waitUntil: 'networkidle2',
-          timeout: 30000
+          timeout: BROWSERLESS_PAGE_TIMEOUT
         }
-      })
+      }),
+      signal: controller.signal  // V3.4: 타임아웃 시그널
     });
     
     if (!response.ok) {
@@ -123,21 +163,39 @@ export async function captureElementScreenshot(
       image_data: imageData
     };
   } catch (error) {
+    const errorName = error instanceof Error ? error.name : '';
+    
+    if (errorName === 'AbortError') {
+      console.warn(`[Browserless] 요소 스크린샷 타임아웃: ${url} (${selector})`);
+      return {
+        success: false,
+        error: `Browserless 요소 스크린샷 시간 초과 (${BROWSERLESS_REQUEST_TIMEOUT / 1000}초)`
+      };
+    }
+    
     return {
       success: false,
       error: `Browserless error: ${error instanceof Error ? error.message : 'Unknown error'}`
     };
+  } finally {
+    clearTimeout(timeoutId);  // V3.4: 타임아웃 클리어
   }
 }
 
 /**
  * Browserless를 사용하여 페이지에서 이미지 URL 추출
+ * 
+ * V3.4 안정화: 세션 종료 보장
  */
 export async function extractImageUrls(
   apiKey: string,
   searchUrl: string,
   maxImages: number = 10
 ): Promise<{ success: boolean; urls?: string[]; error?: string }> {
+  // V3.4: AbortController를 사용한 전체 요청 타임아웃
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), BROWSERLESS_REQUEST_TIMEOUT);
+  
   try {
     // Browserless의 /function API를 사용하여 JavaScript 실행
     const response = await fetch(`${BROWSERLESS_API_URL}/function?token=${apiKey}`, {
@@ -148,7 +206,7 @@ export async function extractImageUrls(
       body: JSON.stringify({
         code: `
           module.exports = async ({ page }) => {
-            await page.goto('${searchUrl}', { waitUntil: 'networkidle2', timeout: 30000 });
+            await page.goto('${searchUrl}', { waitUntil: 'networkidle2', timeout: ${BROWSERLESS_PAGE_TIMEOUT} });
             
             // 스크롤하여 더 많은 이미지 로드
             await page.evaluate(() => {
@@ -175,7 +233,8 @@ export async function extractImageUrls(
           };
         `,
         context: {}
-      })
+      }),
+      signal: controller.signal  // V3.4: 타임아웃 시그널
     });
     
     if (!response.ok) {
@@ -193,10 +252,22 @@ export async function extractImageUrls(
       urls: result.urls || []
     };
   } catch (error) {
+    const errorName = error instanceof Error ? error.name : '';
+    
+    if (errorName === 'AbortError') {
+      console.warn(`[Browserless] 이미지 URL 추출 타임아웃: ${searchUrl}`);
+      return {
+        success: false,
+        error: `Browserless 이미지 URL 추출 시간 초과 (${BROWSERLESS_REQUEST_TIMEOUT / 1000}초)`
+      };
+    }
+    
     return {
       success: false,
       error: `Browserless extraction error: ${error instanceof Error ? error.message : 'Unknown error'}`
     };
+  } finally {
+    clearTimeout(timeoutId);  // V3.4: 타임아웃 클리어 (메모리 누수 방지)
   }
 }
 
@@ -330,6 +401,39 @@ function getRandomUserAgent(): string {
 const DOWNLOAD_TIMEOUT_MS = 8000; // 8초
 
 /**
+ * 차단된 도메인 로깅 인터페이스
+ * 
+ * V3.4 안정화: 차단 도메인 모니터링
+ * - text/html 감지 시 보험사 도메인 기록
+ * - R2 샘플 추가 우선순위 결정용
+ */
+export interface BlockedDomainLog {
+  domain: string;
+  fullUrl: string;
+  blockReason: 'CONTENT_TYPE_HTML' | 'MAGIC_BYTE_HTML' | 'HTTP_403' | 'HTTP_404' | 'TIMEOUT' | 'OTHER';
+  statusCode?: number;
+  contentType?: string;
+  timestamp: string;
+  userAgent: string;
+}
+
+/**
+ * 차단 도메인 로그 생성 및 출력
+ * 
+ * 콘솔에 구조화된 로그를 출력하여 Cloudflare Workers 대시보드에서 확인 가능
+ */
+function logBlockedDomain(log: BlockedDomainLog): void {
+  // 구조화된 JSON 로그 출력 (Cloudflare Workers에서 검색 가능)
+  console.log(JSON.stringify({
+    type: 'BLOCKED_DOMAIN',
+    ...log
+  }));
+  
+  // 사람이 읽기 쉬운 형태로도 출력
+  console.warn(`[BLOCKED] ${log.domain} | Reason: ${log.blockReason} | Status: ${log.statusCode || 'N/A'} | ContentType: ${log.contentType || 'N/A'}`);
+}
+
+/**
  * HTML 응답인지 매직 바이트로 확인
  * HTML은 보통 '<' (0x3C)로 시작하거나 '<!DOCTYPE' (3C 21 44 4F)로 시작
  */
@@ -417,34 +521,51 @@ export async function downloadImage(
     // ============================================
     if (!response.ok) {
       const statusCode = response.status;
+      const domain = extractRefererDomain(imageUrl).replace(/^https?:\/\//, '');
       
       // 구체적인 에러 메시지 생성
       let errorMessage: string;
       let errorCode: ImageDownloadErrorCode;
+      let blockReason: BlockedDomainLog['blockReason'];
       
       switch (statusCode) {
         case 404:
           errorMessage = '이미지가 존재하지 않습니다 (404 Not Found)';
           errorCode = 'HTTP_ERROR';
+          blockReason = 'HTTP_404';
           break;
         case 403:
           errorMessage = '이미지 접근이 차단되었습니다 (403 Forbidden)';
           errorCode = 'BLOCKED_ACCESS';
+          blockReason = 'HTTP_403';
           break;
         case 401:
           errorMessage = '이미지 접근 권한이 없습니다 (401 Unauthorized)';
           errorCode = 'BLOCKED_ACCESS';
+          blockReason = 'HTTP_403';
           break;
         case 500:
         case 502:
         case 503:
           errorMessage = '이미지 서버에 오류가 발생했습니다 (서버 오류)';
           errorCode = 'HTTP_ERROR';
+          blockReason = 'OTHER';
           break;
         default:
           errorMessage = `이미지 다운로드 실패 (HTTP ${statusCode})`;
           errorCode = 'HTTP_ERROR';
+          blockReason = 'OTHER';
       }
+      
+      // V3.4 안정화: 차단 도메인 로깅
+      logBlockedDomain({
+        domain,
+        fullUrl: imageUrl,
+        blockReason,
+        statusCode,
+        timestamp: new Date().toISOString(),
+        userAgent
+      });
       
       return {
         success: false,
@@ -462,6 +583,19 @@ export async function downloadImage(
     
     // text/html인 경우 즉시 예외 처리 (에러 페이지, 차단 페이지)
     if (contentTypeLower.includes('text/html') || contentTypeLower.includes('text/plain')) {
+      const domain = extractRefererDomain(imageUrl).replace(/^https?:\/\//, '');
+      
+      // V3.4 안정화: text/html 차단 도메인 로깅 (R2 샘플 우선순위 결정용)
+      logBlockedDomain({
+        domain,
+        fullUrl: imageUrl,
+        blockReason: 'CONTENT_TYPE_HTML',
+        statusCode: response.status,
+        contentType,
+        timestamp: new Date().toISOString(),
+        userAgent
+      });
+      
       return {
         success: false,
         error: '이미지가 아닌 웹페이지가 반환되었습니다. 이미지 접근이 차단되었거나 존재하지 않습니다.',
@@ -490,10 +624,23 @@ export async function downloadImage(
     // [필수] HTML 응답 감지 (매직 바이트 체크)
     // ============================================
     if (isHtmlResponse(data)) {
+      const domain = extractRefererDomain(imageUrl).replace(/^https?:\/\//, '');
+      
       // HTML 응답의 처음 200자를 로깅 (디버깅용)
       const textDecoder = new TextDecoder('utf-8', { fatal: false });
       const previewText = textDecoder.decode(data.slice(0, 200));
       console.log(`[downloadImage] HTML 응답 감지됨: ${previewText.substring(0, 100)}...`);
+      
+      // V3.4 안정화: 매직바이트 HTML 차단 도메인 로깅
+      logBlockedDomain({
+        domain,
+        fullUrl: imageUrl,
+        blockReason: 'MAGIC_BYTE_HTML',
+        statusCode: response.status,
+        contentType,
+        timestamp: new Date().toISOString(),
+        userAgent
+      });
       
       return {
         success: false,
@@ -532,9 +679,19 @@ export async function downloadImage(
     // 네트워크 오류 처리
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     const errorName = error instanceof Error ? error.name : '';
+    const domain = extractRefererDomain(imageUrl).replace(/^https?:\/\//, '');
     
     // V3.4: AbortError 처리 (타임아웃)
     if (errorName === 'AbortError' || errorMessage.includes('aborted')) {
+      // V3.4 안정화: 타임아웃 차단 도메인 로깅
+      logBlockedDomain({
+        domain,
+        fullUrl: imageUrl,
+        blockReason: 'TIMEOUT',
+        timestamp: new Date().toISOString(),
+        userAgent: 'N/A (timeout before response)'
+      });
+      
       return {
         success: false,
         error: `이미지 다운로드 시간이 초과되었습니다 (${DOWNLOAD_TIMEOUT_MS / 1000}초). 서버 응답이 느립니다.`,
@@ -553,6 +710,15 @@ export async function downloadImage(
     } else {
       userFriendlyMessage = `이미지 다운로드 중 오류가 발생했습니다: ${errorMessage}`;
     }
+    
+    // V3.4 안정화: 기타 네트워크 오류 로깅
+    logBlockedDomain({
+      domain,
+      fullUrl: imageUrl,
+      blockReason: 'OTHER',
+      timestamp: new Date().toISOString(),
+      userAgent: 'N/A (network error)'
+    });
     
     return {
       success: false,
