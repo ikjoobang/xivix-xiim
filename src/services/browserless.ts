@@ -257,46 +257,243 @@ export function validateImageData(
 }
 
 /**
- * 특정 URL의 이미지 직접 다운로드 (검증 포함)
+ * 이미지 다운로드 에러 코드 정의
+ */
+export type ImageDownloadErrorCode = 
+  | 'HTTP_ERROR'           // HTTP 상태 코드 오류 (404, 403 등)
+  | 'CONTENT_TYPE_ERROR'   // Content-Type이 이미지가 아님 (text/html 등)
+  | 'HTML_RESPONSE'        // 응답이 HTML 페이지 (에러 페이지, 차단 페이지)
+  | 'INVALID_FORMAT'       // 유효하지 않은 이미지 형식
+  | 'SIZE_TOO_SMALL'       // 이미지 크기가 너무 작음
+  | 'NETWORK_ERROR'        // 네트워크 오류
+  | 'BLOCKED_ACCESS';      // 접근 차단됨
+
+export interface ImageDownloadResult {
+  success: boolean;
+  data?: ArrayBuffer;
+  contentType?: string;
+  error?: string;
+  errorCode?: ImageDownloadErrorCode;
+  statusCode?: number;
+}
+
+/**
+ * URL에서 Referer 도메인 추출
+ */
+function extractRefererDomain(imageUrl: string): string {
+  try {
+    const url = new URL(imageUrl);
+    return `${url.protocol}//${url.hostname}`;
+  } catch {
+    return 'https://www.google.com';
+  }
+}
+
+/**
+ * HTML 응답인지 매직 바이트로 확인
+ * HTML은 보통 '<' (0x3C)로 시작하거나 '<!DOCTYPE' (3C 21 44 4F)로 시작
+ */
+function isHtmlResponse(data: ArrayBuffer): boolean {
+  if (data.byteLength < 10) return false;
+  
+  const bytes = new Uint8Array(data.slice(0, 20));
+  
+  // <!DOCTYPE html (3C 21 44 4F 43 54 59 50 45)
+  if (bytes[0] === 0x3C && bytes[1] === 0x21 && bytes[2] === 0x44 && bytes[3] === 0x4F) {
+    return true;
+  }
+  
+  // <html (3C 68 74 6D 6C) or <HTML
+  if (bytes[0] === 0x3C && (
+    (bytes[1] === 0x68 && bytes[2] === 0x74 && bytes[3] === 0x6D && bytes[4] === 0x6C) ||
+    (bytes[1] === 0x48 && bytes[2] === 0x54 && bytes[3] === 0x4D && bytes[4] === 0x4C)
+  )) {
+    return true;
+  }
+  
+  // BOM + HTML (EF BB BF + <)
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF && bytes[3] === 0x3C) {
+    return true;
+  }
+  
+  // 단순 '<' 시작 (대부분의 HTML)
+  if (bytes[0] === 0x3C) {
+    // 추가 확인: 처음 100바이트에 html, HTML, head, body 등이 있는지
+    const textDecoder = new TextDecoder('utf-8', { fatal: false });
+    const text = textDecoder.decode(data.slice(0, 100)).toLowerCase();
+    if (text.includes('<!doctype') || text.includes('<html') || text.includes('<head')) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * 특정 URL의 이미지 직접 다운로드 (강화된 검증 포함)
+ * 
+ * 체크리스트:
+ * [필수] 상태 코드 검증: HTTP 200 OK 확인
+ * [필수] MIME 타입 체크: Content-Type이 image/* 인지 확인
+ * [필수] HTML 응답 감지: text/html 또는 매직바이트로 HTML 감지
+ * [선택] 헤더 보정: User-Agent, Referer 설정
  */
 export async function downloadImage(
   imageUrl: string
-): Promise<{ success: boolean; data?: ArrayBuffer; contentType?: string; error?: string }> {
+): Promise<ImageDownloadResult> {
   try {
+    // Referer 추출 (보험사 사이트 차단 우회용)
+    const referer = extractRefererDomain(imageUrl);
+    
     const response = await fetch(imageUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        // 브라우저와 유사한 User-Agent
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        // Referer 설정으로 차단 우회
+        'Referer': referer,
+        // Accept 헤더로 이미지만 요청
+        'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Cache-Control': 'no-cache'
       }
     });
     
+    // ============================================
+    // [필수] 상태 코드 검증
+    // ============================================
     if (!response.ok) {
+      const statusCode = response.status;
+      
+      // 구체적인 에러 메시지 생성
+      let errorMessage: string;
+      let errorCode: ImageDownloadErrorCode;
+      
+      switch (statusCode) {
+        case 404:
+          errorMessage = '이미지가 존재하지 않습니다 (404 Not Found)';
+          errorCode = 'HTTP_ERROR';
+          break;
+        case 403:
+          errorMessage = '이미지 접근이 차단되었습니다 (403 Forbidden)';
+          errorCode = 'BLOCKED_ACCESS';
+          break;
+        case 401:
+          errorMessage = '이미지 접근 권한이 없습니다 (401 Unauthorized)';
+          errorCode = 'BLOCKED_ACCESS';
+          break;
+        case 500:
+        case 502:
+        case 503:
+          errorMessage = '이미지 서버에 오류가 발생했습니다 (서버 오류)';
+          errorCode = 'HTTP_ERROR';
+          break;
+        default:
+          errorMessage = `이미지 다운로드 실패 (HTTP ${statusCode})`;
+          errorCode = 'HTTP_ERROR';
+      }
+      
       return {
         success: false,
-        error: `Image download failed: ${response.status}`
+        error: errorMessage,
+        errorCode,
+        statusCode
       };
     }
     
+    // ============================================
+    // [필수] MIME 타입 체크 (Content-Type 헤더 선검증)
+    // ============================================
     const contentType = response.headers.get('content-type') || '';
-    const data = await response.arrayBuffer();
+    const contentTypeLower = contentType.toLowerCase();
     
-    // ✅ 이미지 유효성 검증 추가
-    const validation = validateImageData(data, contentType);
-    if (!validation.valid) {
+    // text/html인 경우 즉시 예외 처리 (에러 페이지, 차단 페이지)
+    if (contentTypeLower.includes('text/html') || contentTypeLower.includes('text/plain')) {
       return {
         success: false,
-        error: `Invalid image file: ${validation.error}`
+        error: '이미지가 아닌 웹페이지가 반환되었습니다. 이미지 접근이 차단되었거나 존재하지 않습니다.',
+        errorCode: 'CONTENT_TYPE_ERROR',
+        statusCode: response.status
+      };
+    }
+    
+    // application/json인 경우 (API 에러 응답)
+    if (contentTypeLower.includes('application/json')) {
+      return {
+        success: false,
+        error: '이미지 서버에서 API 에러 응답이 반환되었습니다.',
+        errorCode: 'CONTENT_TYPE_ERROR',
+        statusCode: response.status
+      };
+    }
+    
+    // Content-Type이 image/* 가 아닌 경우 경고 (하지만 바이너리 데이터는 확인)
+    const isImageContentType = contentTypeLower.includes('image/');
+    
+    // 데이터 다운로드
+    const data = await response.arrayBuffer();
+    
+    // ============================================
+    // [필수] HTML 응답 감지 (매직 바이트 체크)
+    // ============================================
+    if (isHtmlResponse(data)) {
+      // HTML 응답의 처음 200자를 로깅 (디버깅용)
+      const textDecoder = new TextDecoder('utf-8', { fatal: false });
+      const previewText = textDecoder.decode(data.slice(0, 200));
+      console.log(`[downloadImage] HTML 응답 감지됨: ${previewText.substring(0, 100)}...`);
+      
+      return {
+        success: false,
+        error: '이미지 대신 HTML 에러 페이지가 반환되었습니다. 원본 사이트에서 이미지 접근을 차단했을 수 있습니다.',
+        errorCode: 'HTML_RESPONSE',
+        statusCode: response.status
+      };
+    }
+    
+    // ============================================
+    // 이미지 유효성 검증 (매직 바이트 + 크기)
+    // ============================================
+    const validation = validateImageData(data, isImageContentType ? contentType : undefined);
+    if (!validation.valid) {
+      // 에러 타입 분류
+      const errorCode: ImageDownloadErrorCode = validation.error?.includes('크기') 
+        ? 'SIZE_TOO_SMALL' 
+        : 'INVALID_FORMAT';
+      
+      return {
+        success: false,
+        error: `이미지 파일이 유효하지 않습니다: ${validation.error}`,
+        errorCode,
+        statusCode: response.status
       };
     }
     
     return {
       success: true,
       data,
-      contentType: contentType || 'image/png'
+      contentType: isImageContentType ? contentType : 'image/png',
+      statusCode: response.status
     };
+    
   } catch (error) {
+    // 네트워크 오류 처리
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    
+    // 구체적인 네트워크 오류 분류
+    let userFriendlyMessage: string;
+    if (errorMessage.includes('fetch') || errorMessage.includes('network')) {
+      userFriendlyMessage = '네트워크 연결 오류가 발생했습니다. 이미지 서버에 연결할 수 없습니다.';
+    } else if (errorMessage.includes('timeout')) {
+      userFriendlyMessage = '이미지 다운로드 시간이 초과되었습니다.';
+    } else if (errorMessage.includes('SSL') || errorMessage.includes('certificate')) {
+      userFriendlyMessage = 'SSL 인증서 오류가 발생했습니다.';
+    } else {
+      userFriendlyMessage = `이미지 다운로드 중 오류가 발생했습니다: ${errorMessage}`;
+    }
+    
     return {
       success: false,
-      error: `Image download error: ${error instanceof Error ? error.message : 'Unknown error'}`
+      error: userFriendlyMessage,
+      errorCode: 'NETWORK_ERROR'
     };
   }
 }
