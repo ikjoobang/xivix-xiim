@@ -264,13 +264,33 @@ R2 골든 샘플 로드 시도
 정상 응답 반환
 ```
 
+## V3.4 개선사항 (2026-01-20)
+
+### 헤더 보정 유연성 (Random User-Agent)
+고정 User-Agent 사용 시 패턴 분석으로 차단될 수 있어, 11개의 다양한 브라우저/OS 조합 중 랜덤 선택:
+
+| 브라우저 | OS | 버전 수 |
+|---------|-------|--------|
+| Chrome | Windows | 3 |
+| Chrome | macOS | 2 |
+| Firefox | Windows | 2 |
+| Edge | Windows | 1 |
+| Safari | macOS | 1 |
+| Chrome Mobile | Android | 1 |
+| Chrome Mobile | iOS | 1 |
+
+### 타임아웃 설정
+보험사 서버 응답 지연 대비 `AbortController` 기반 타임아웃:
+- **설정값**: 8초 (`DOWNLOAD_TIMEOUT_MS = 8000`)
+- **에러 메시지**: "이미지 다운로드 시간이 초과되었습니다 (8초). 서버 응답이 느립니다."
+
 ## 배포 상태
 
 - **Platform**: Cloudflare Pages
 - **Status**: ✅ Active
 - **Last Updated**: 2026-01-20
-- **Version**: v1.2.1 (Dynamic Title + Enhanced Validation)
-- **Commit**: 285cf95
+- **Version**: v1.3.4 (V3.4 Checklist Compliance)
+- **Commit**: 740c0e2
 - **Secrets Configured**: 7개 (GEMINI_API_KEY, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, BROWSERLESS_API_KEY, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET, XIVIX_API_KEY)
 
 ## 로컬 개발
