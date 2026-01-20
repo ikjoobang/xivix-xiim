@@ -290,6 +290,46 @@ function extractRefererDomain(imageUrl: string): string {
 }
 
 /**
+ * 랜덤 User-Agent 생성 (봇 탐지 우회)
+ * 
+ * V3.4 체크리스트: 헤더 보정의 유연성
+ * - 고정 User-Agent 사용 시 패턴 분석으로 차단될 수 있음
+ * - 다양한 브라우저/OS 조합으로 랜덤 선택
+ */
+function getRandomUserAgent(): string {
+  const userAgents = [
+    // Chrome on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    // Chrome on macOS
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    // Firefox on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    // Edge on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
+    // Safari on macOS
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+    // Mobile Chrome (한국 모바일 트래픽 비중 고려)
+    'Mozilla/5.0 (Linux; Android 13; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1'
+  ];
+  
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+}
+
+/** 
+ * 이미지 다운로드 타임아웃 (밀리초)
+ * 
+ * V3.4 체크리스트: 타임아웃 설정
+ * - 보험사 서버 응답 지연 대비
+ * - 권장 범위: 5~8초
+ */
+const DOWNLOAD_TIMEOUT_MS = 8000; // 8초
+
+/**
  * HTML 응답인지 매직 바이트로 확인
  * HTML은 보통 '<' (0x3C)로 시작하거나 '<!DOCTYPE' (3C 21 44 4F)로 시작
  */
@@ -332,11 +372,12 @@ function isHtmlResponse(data: ArrayBuffer): boolean {
 /**
  * 특정 URL의 이미지 직접 다운로드 (강화된 검증 포함)
  * 
- * 체크리스트:
+ * V3.4 체크리스트:
  * [필수] 상태 코드 검증: HTTP 200 OK 확인
  * [필수] MIME 타입 체크: Content-Type이 image/* 인지 확인
  * [필수] HTML 응답 감지: text/html 또는 매직바이트로 HTML 감지
- * [선택] 헤더 보정: User-Agent, Referer 설정
+ * [V3.4] 헤더 보정 유연성: 랜덤 User-Agent 사용
+ * [V3.4] 타임아웃 설정: 8초 (DOWNLOAD_TIMEOUT_MS)
  */
 export async function downloadImage(
   imageUrl: string
@@ -345,18 +386,31 @@ export async function downloadImage(
     // Referer 추출 (보험사 사이트 차단 우회용)
     const referer = extractRefererDomain(imageUrl);
     
-    const response = await fetch(imageUrl, {
-      headers: {
-        // 브라우저와 유사한 User-Agent
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        // Referer 설정으로 차단 우회
-        'Referer': referer,
-        // Accept 헤더로 이미지만 요청
-        'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Cache-Control': 'no-cache'
-      }
-    });
+    // V3.4: 랜덤 User-Agent 사용 (패턴 분석 차단 우회)
+    const userAgent = getRandomUserAgent();
+    
+    // V3.4: AbortController를 사용한 타임아웃 설정
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+    
+    let response: Response;
+    try {
+      response = await fetch(imageUrl, {
+        headers: {
+          // V3.4: 랜덤 User-Agent로 봇 탐지 우회
+          'User-Agent': userAgent,
+          // Referer 설정으로 차단 우회
+          'Referer': referer,
+          // Accept 헤더로 이미지만 요청
+          'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+          'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Cache-Control': 'no-cache'
+        },
+        signal: controller.signal  // V3.4: 타임아웃 시그널
+      });
+    } finally {
+      clearTimeout(timeoutId);  // 타임아웃 클리어
+    }
     
     // ============================================
     // [필수] 상태 코드 검증
@@ -477,13 +531,23 @@ export async function downloadImage(
   } catch (error) {
     // 네트워크 오류 처리
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const errorName = error instanceof Error ? error.name : '';
+    
+    // V3.4: AbortError 처리 (타임아웃)
+    if (errorName === 'AbortError' || errorMessage.includes('aborted')) {
+      return {
+        success: false,
+        error: `이미지 다운로드 시간이 초과되었습니다 (${DOWNLOAD_TIMEOUT_MS / 1000}초). 서버 응답이 느립니다.`,
+        errorCode: 'NETWORK_ERROR'
+      };
+    }
     
     // 구체적인 네트워크 오류 분류
     let userFriendlyMessage: string;
     if (errorMessage.includes('fetch') || errorMessage.includes('network')) {
       userFriendlyMessage = '네트워크 연결 오류가 발생했습니다. 이미지 서버에 연결할 수 없습니다.';
     } else if (errorMessage.includes('timeout')) {
-      userFriendlyMessage = '이미지 다운로드 시간이 초과되었습니다.';
+      userFriendlyMessage = `이미지 다운로드 시간이 초과되었습니다 (${DOWNLOAD_TIMEOUT_MS / 1000}초).`;
     } else if (errorMessage.includes('SSL') || errorMessage.includes('certificate')) {
       userFriendlyMessage = 'SSL 인증서 오류가 발생했습니다.';
     } else {
